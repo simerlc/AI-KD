@@ -13,23 +13,75 @@
 
 ## 仓库结构
 
-| 包 | 职责 | 示例/入口 |
-|----|------|-----------|
-| `packages/agent/` | Planner / Builder / Tester / Orchestrator（Agent 编排） | `src/planner.ts` |
-| `packages/app-engine/` | App Model schema、验证与版本管理 | `src/schema.ts` |
-| `packages/component-registry/` | 组件定义与 props schema | `src/index.ts` |
-| `packages/server/` | 后端服务（Hono）、沙箱管理、DB、LLM 适配 | `src/index.ts` |
-| `packages/shared/` | 共享类型与接口 | `src/types/app-model.ts` |
-| `packages/web/` | 前端（React + Vite） | `src/main.tsx` |
+本仓库为 pnpm monorepo，根目录只放工程配置与文档，所有源码按职责拆分到 `packages/*`。
 
-**server 包内部结构**（`packages/server/src/`）：
-- `routes/` — HTTP 路由：`tasks`（任务与预览）、`acp`（ACP 协议 / SSE 流式生成）、`misc`
-- `sandbox/` — 沙箱实现（Docker / Node 本地子进程）与端口分配
-- `llm/` — LLM Provider（OpenAI 兼容）与 Agent 适配层
-- `db/` — drizzle schema 与仓储层
-- `middleware/auth` — 认证中间件（默认本地用户）
-- `lib/` — 工作区文件管理、工具
-- `services/`、`plugins/`、`agent/` — 持久化服务、插件与 Agent 会话管理
+```
+AIKD-V1/
+├── AIKD-V1-PLAN.md        # V1 产品规格与实施计划（最高优先级需求文档）
+├── DEVELOPER.md           # 本文档：开发与运行说明
+├── NOTICE                 # 开源声明 / 许可证声明
+├── package.json           # 根 workspace 脚本（dev / build / lint / type-check 等）
+├── pnpm-workspace.yaml    # workspace 包声明
+├── tsconfig.json          # 全局 TS 配置（base）
+├── scripts/               # 仓库级脚本（初始化、构建、部署等）
+└── packages/
+    ├── web/               # @aikd/web    前端（React 19 + Vite）
+    ├── server/            # @aikd/server 后端（Hono + SQLite + 沙箱）
+    ├── shared/            # @aikd/shared 共享类型与协议定义
+    ├── app-engine/        # @aikd/app-engine App Model schema / 校验 / 版本 / 模板
+    ├── component-registry/# @aikd/component-registry 内置组件 + props schema
+    └── agent/             # @aikd/agent  Planner / Builder / Tester / Orchestrator
+```
+
+### 各包职责速览
+
+| 包 | 命名空间 | 职责 | 入口 / 关键文件 |
+|----|----------|------|-----------------|
+| `packages/web/` | `@aikd/web` | 前端 UI（React + Vite），ACP 聊天、预览 iframe、版本列表 | `src/main.tsx`、`src/pages/`、`src/components/`、`src/hooks/`（如 `use-preview-bridge.ts`） |
+| `packages/server/` | `@aikd/server` | 后端服务（Hono）、HTTP 路由、沙箱管理、DB、LLM 适配 | `src/index.ts` |
+| `packages/shared/` | `@aikd/shared` | 跨端共享类型与接口（ACP 协议、App Model、Task） | `src/index.ts`、`src/types/app-model.ts` |
+| `packages/app-engine/` | `@aikd/app-engine` | App Model schema、校验器、版本管理、页面模板 | `src/schema.ts`、`src/validator.ts`、`src/version.ts`、`src/templates.ts` |
+| `packages/component-registry/` | `@aikd/component-registry` | 内置组件定义与 props schema（供 Planner/Builder 引用） | `src/index.ts`、`src/registry.ts`、`src/types.ts`、`src/components/` |
+| `packages/agent/` | `@aikd/agent` | Agent 编排：Planner / Builder / Tester / Orchestrator | `src/planner.ts`、`src/builder.ts`、`src/tester.ts`、`src/orchestrator.ts`、`src/types.ts`、`src/utils.ts` |
+
+### `packages/server/src/` 内部结构
+
+```
+server/src/
+├── index.ts          # 服务入口：启动 Hono、加载 .env、清理孤儿沙箱
+├── routes/           # HTTP 路由层
+│   ├── acp.ts        #   ACP 协议 / SSE 流式生成（对话入口）
+│   ├── tasks.ts      #   任务（应用）与预览管理
+│   ├── auth.ts       #   认证（默认本地账号）
+│   └── misc.ts       #   杂项 / 健康检查
+├── sandbox/          # 沙箱实现与端口分配
+│   ├── index.ts              #   沙箱工厂 / 统一接口
+│   ├── local-node-sandbox.ts #   Node 本地子进程模式（默认，无需 Docker）
+│   ├── local-docker-sandbox.ts# Docker 容器模式
+│   └── port-allocator.ts    #   预览端口分配（默认 5173–5199）
+├── llm/              # LLM Provider（OpenAI 兼容）与 Agent 适配层
+├── db/               # drizzle schema 与仓储层（SQLite）
+├── agent/            # Agent 会话管理（对接 @aikd/agent）
+├── services/         # 持久化 / 业务逻辑服务
+├── plugins/          # 服务端插件
+├── middleware/       # 中间件（认证等）
+├── lib/              # 工作区文件管理、通用工具
+├── config/           # 配置加载（env → 运行时配置）
+├── constant/         # 常量定义
+└── util/             # 底层工具函数
+```
+
+### `scripts/` 仓库级脚本
+
+| 脚本 | 用途 |
+|------|------|
+| `init.mjs` | 初始化工程（生成 `.env` 模板等），开发前运行 |
+| `deploy.mjs` | 本地部署 / 发布辅助 |
+| `clear_tasks_sqljs.mjs` | 清理数据库任务数据 |
+| `sandbox-image/` | 沙箱 Docker 镜像构建相关文件 |
+| `*.cmd` / `*.ps1` / `*.sh` | Windows / 跨平台构建与启动辅助脚本 |
+
+> 注：部分脚本（如 `opencode-setup.mjs`、`codebuddy-setup.mjs`、`setup-tcr.mjs`、`test-create-cloudrun.mjs`）为早期原型残留，与 V1 当前架构无关，后续清理时可直接删除。
 
 ---
 
@@ -175,7 +227,7 @@ pnpm lint         # ESLint
 
 - **提交信息格式**：`type(scope): description`
   示例: `feat(agent): add planner retry logic`
-- **分支策略**：feature 分支 → PR 到 `main` → CI 校验通过后合并
+- **分支策略**：feature 分支 → PR 到 `master` → CI 校验通过后合并
 
 ---
 
