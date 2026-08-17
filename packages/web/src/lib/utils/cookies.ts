@@ -152,6 +152,22 @@ export function setFilesPaneWidth(width: number): void {
   setCookie(FILES_PANE_WIDTH_COOKIE, width.toString())
 }
 
+// Code (file preview) pane width — draggable between file list and preview box.
+const CODE_PANE_WIDTH_COOKIE = 'code_pane_width'
+
+export function getCodePaneWidth(): number {
+  const cookieValue = getCookie(CODE_PANE_WIDTH_COOKIE)
+  if (cookieValue) {
+    const width = parseInt(cookieValue, 10)
+    if (!isNaN(width) && width >= 240 && width <= 900) return width
+  }
+  return 480
+}
+
+export function setCodePaneWidth(width: number): void {
+  setCookie(CODE_PANE_WIDTH_COOKIE, width.toString())
+}
+
 export function getChatPaneWidth(): number {
   const cookieValue = getCookie(CHAT_PANE_WIDTH_COOKIE)
   if (cookieValue) {

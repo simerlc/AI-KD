@@ -142,6 +142,7 @@ export function FileBrowser({
   const [showDiscardConfirm, setShowDiscardConfirm] = useState(false)
   const [fileToDiscard, setFileToDiscard] = useState<string | null>(null)
   const [isDiscarding, setIsDiscarding] = useState(false)
+  const [isDownloadingZip, setIsDownloadingZip] = useState(false)
   // Detect OS for keyboard shortcuts
   const isMac = useMemo(() => {
     if (typeof window === 'undefined') return false
@@ -302,6 +303,31 @@ export function FileBrowser({
     },
     [sandboxOnly, fetchDirEntries, taskId, viewMode, setState, expandedFolders],
   )
+
+  const downloadWorkspaceZip = useCallback(async () => {
+    if (isDownloadingZip) return
+    setIsDownloadingZip(true)
+    try {
+      const res = await fetch(`/api/tasks/${taskId}/files/download-zip`, { credentials: 'include' })
+      if (!res.ok) {
+        const text = await res.text()
+        throw new Error(text || `HTTP ${res.status}`)
+      }
+      const blob = await res.blob()
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = `${taskId}-source.zip`
+      document.body.appendChild(a)
+      a.click()
+      a.remove()
+      URL.revokeObjectURL(url)
+    } catch (err) {
+      alert(err instanceof Error ? err.message : '下载失败')
+    } finally {
+      setIsDownloadingZip(false)
+    }
+  }, [taskId, isDownloadingZip])
 
   const fetchBranchFiles = useCallback(async () => {
     if (!hasBranch && !sandboxId && !workspaceReady) return
@@ -1462,6 +1488,18 @@ export function FileBrowser({
           >
             <RotateCcw className="h-3.5 w-3.5" />
           </Button>
+          {(sandboxOnly || hasBranch) && (
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => void downloadWorkspaceZip()}
+              disabled={isDownloadingZip}
+              className="h-7 w-7 p-0"
+              title="打包下载整个文件"
+            >
+              <Download className={`h-3.5 w-3.5 ${isDownloadingZip ? 'animate-spin' : ''}`} />
+            </Button>
+          )}
         </div>
       </div>
 

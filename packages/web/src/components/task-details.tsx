@@ -20,17 +20,18 @@ import { useTasks } from '@/components/app-layout'
 import {
   getShowFilesPane,
   setShowFilesPane as saveShowFilesPane,
-  getShowCodePane,
-  setShowCodePane as saveShowCodePane,
   getShowPreviewPane,
   setShowPreviewPane as saveShowPreviewPane,
   getShowChatPane,
   setShowChatPane as saveShowChatPane,
   getFilesPaneWidth,
   setFilesPaneWidth as saveFilesPaneWidth,
+  getCodePaneWidth,
+  setCodePaneWidth as saveCodePaneWidth,
   getChatPaneWidth,
   setChatPaneWidth as saveChatPaneWidth,
 } from '@/lib/utils/cookies'
+import { X } from 'lucide-react'
 import { FileBrowser } from '@/components/file-browser'
 import { FileDiffViewer } from '@/components/file-diff-viewer'
 import { TaskChat, useChatStream } from '@/chat'
@@ -56,7 +57,7 @@ interface DiffData {
   language: string
 }
 
-type PaneResize = 'files' | 'chat' | null
+type PaneResize = 'files' | 'chat' | 'code' | null
 
 export function TaskDetails({
   task,
@@ -138,7 +139,6 @@ export function TaskDetails({
   const [activeTab, setActiveTab] = useState<'code' | 'chat' | 'preview' | 'model'>('preview')
 
   const [showFilesPane, setShowFilesPaneState] = useState(() => getShowFilesPane())
-  const [showCodePane, setShowCodePaneState] = useState(() => getShowCodePane())
   const isCodingMode = task.mode === 'coding'
   const [showPreviewPane, setShowPreviewPaneState] = useState(() => {
     const raw = typeof document !== 'undefined' ? document.cookie.match(/(^| )show-preview-pane=([^;]+)/) : null
@@ -156,6 +156,7 @@ export function TaskDetails({
 
   const [selectedFile, setSelectedFile] = useState<string | null>(null)
   const [filesPaneWidth, setFilesPaneWidth] = useState(() => getFilesPaneWidth())
+  const [codePaneWidth, setCodePaneWidth] = useState(() => getCodePaneWidth())
   const [chatPaneWidth, setChatPaneWidth] = useState(() => getChatPaneWidth())
   const [resizingPane, setResizingPane] = useState<PaneResize>(null)
   const containerRef = useRef<HTMLDivElement>(null)
@@ -179,7 +180,8 @@ export function TaskDetails({
     isDone
   )
   const hasFilesSupport = hasBranch || !!task.sandboxId || workspaceReady
-  const showCodeViewer = (showCodePane && (hasBranch || workspaceReady)) || (!!selectedFile && showFilesPane)
+  // 代码预览框在点击具体文件后才出现，关闭文件面板时一并隐藏。
+  const showCodeViewer = showFilesPane && !!selectedFile && hasFilesSupport
 
   // 历史记录可能 previewUrl 为 null（后端重启后沙箱进程丢失/生成时未回写）。
   // 任务状态枚举：pending/created（未开始）、done/completed（完成）、error/stopped（可能已有部分产物）。
@@ -250,11 +252,8 @@ export function TaskDetails({
     const newValue = !showFilesPane
     setShowFilesPaneState(newValue)
     saveShowFilesPane(newValue)
-  }
-  const toggleCodePane = () => {
-    const newValue = !showCodePane
-    setShowCodePaneState(newValue)
-    saveShowCodePane(newValue)
+    // 关闭文件面板时一并隐藏代码预览框
+    if (!newValue) setSelectedFile(null)
   }
   const togglePreviewPane = () => {
     const newValue = !showPreviewPane
@@ -281,12 +280,8 @@ export function TaskDetails({
     (file: string, isFolder?: boolean) => {
       if (isFolder) return
       setSelectedFile(file)
-      if (!showCodePane) {
-        setShowCodePaneState(true)
-        saveShowCodePane(true)
-      }
     },
-    [showCodePane],
+    [],
   )
 
   const fetchAllDiffs = useCallback(
@@ -320,6 +315,9 @@ export function TaskDetails({
       if (resizingPane === 'files') {
         const newWidth = Math.max(180, Math.min(480, e.clientX - rect.left))
         setFilesPaneWidth(newWidth)
+      } else if (resizingPane === 'code') {
+        const newWidth = Math.max(240, Math.min(900, e.clientX - rect.left - filesPaneWidth))
+        setCodePaneWidth(newWidth)
       } else if (resizingPane === 'chat') {
         const newWidth = Math.max(240, Math.min(720, rect.right - e.clientX))
         setChatPaneWidth(newWidth)
@@ -327,6 +325,7 @@ export function TaskDetails({
     }
     const handleUp = () => {
       if (resizingPane === 'files') saveFilesPaneWidth(filesPaneWidth)
+      if (resizingPane === 'code') saveCodePaneWidth(codePaneWidth)
       if (resizingPane === 'chat') saveChatPaneWidth(chatPaneWidth)
       setResizingPane(null)
     }
@@ -338,7 +337,7 @@ export function TaskDetails({
         window.removeEventListener('mouseup', handleUp)
       }
     }
-  }, [resizingPane, filesPaneWidth, chatPaneWidth])
+  }, [resizingPane, filesPaneWidth, codePaneWidth, chatPaneWidth])
 
   const StatusIcon = () => {
     if (currentStatus === 'processing') {
@@ -443,9 +442,10 @@ export function TaskDetails({
             size="sm"
             className={cn(
             'h-7 px-2.5 text-xs rounded-md',
-            showCodePane && 'bg-primary/10 text-primary hover:bg-primary/15'
+            showCodeViewer && 'bg-primary/10 text-primary hover:bg-primary/15'
           )}
-            onClick={toggleCodePane}
+            onClick={() => setSelectedFile(null)}
+            disabled={!showCodeViewer}
           >
             <Code className="h-3.5 w-3.5 mr-1" />
             代码
@@ -502,7 +502,7 @@ export function TaskDetails({
           </div>
         )}
 
-        {showFilesPane && showCodePane && hasBranch && (
+        {showFilesPane && showCodeViewer && (
           <div
             className="w-1 cursor-col-resize flex-shrink-0 relative group bg-border hover:bg-primary/50 transition-colors"
             onMouseDown={() => setResizingPane('files')}
@@ -510,10 +510,22 @@ export function TaskDetails({
         )}
 
         {showCodeViewer && (
-          <div className="flex-1 min-h-0 min-w-0 flex flex-col">
+          <div
+            className="min-h-0 min-w-0 flex flex-col flex-shrink-0 border-r"
+            style={{ width: `${codePaneWidth}px` }}
+          >
             <div className="flex items-center gap-2 px-3 h-[40px] border-b flex-shrink-0">
-              <FileText className="h-3.5 w-3.5 text-muted-foreground" />
+              <FileText className="h-3.5 w-3.5 text-muted-foreground flex-shrink-0" />
               <span className="text-sm text-muted-foreground truncate flex-1">{selectedFile || '选择文件'}</span>
+              <Button
+                variant="ghost"
+                size="sm"
+                className="h-7 w-7 p-0 flex-shrink-0"
+                onClick={() => setSelectedFile(null)}
+                title="关闭预览框"
+              >
+                <X className="h-3.5 w-3.5" />
+              </Button>
             </div>
             <div className="flex-1 min-h-0 overflow-hidden">
               <FileDiffViewer
@@ -525,6 +537,13 @@ export function TaskDetails({
               />
             </div>
           </div>
+        )}
+
+        {showCodeViewer && showPreviewPane && (
+          <div
+            className="w-1 cursor-col-resize flex-shrink-0 relative group bg-border hover:bg-primary/50 transition-colors"
+            onMouseDown={() => setResizingPane('code')}
+          />
         )}
 
         {showPreviewPane && <div className="flex-[4] min-w-0 min-h-0 flex flex-col">{renderPreviewPane()}</div>}

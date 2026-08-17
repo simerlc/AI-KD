@@ -595,4 +595,56 @@ tasks.post('/:taskId/save-file', async (c) => {
   }
 })
 
+// 将整个工作区源码打包为 zip 下载（排除 node_modules/.git/dist 等）
+tasks.get('/:taskId/files/download-zip', async (c) => {
+  const result = await resolveTaskWorkspace(c, c.req.param('taskId'))
+  if ('authErr' in result && result.authErr) return result.authErr
+  if ('error' in result && result.error) return c.json({ error: result.error }, result.status as 404 | 409)
+
+  const { workspacePath, appId } = result
+
+  // 递归收集需要打包的文件
+  const files: Record<string, Uint8Array> = {}
+  const walk = async (dir: string, relPrefix: string) => {
+    const entries = await fs.readdir(dir, { withFileTypes: true })
+    for (const entry of entries) {
+      if (IGNORED_ENTRIES.has(entry.name)) continue
+      const rel = relPrefix ? `${relPrefix}/${entry.name}` : entry.name
+      const abs = path.join(dir, entry.name)
+      if (entry.isDirectory()) {
+        await walk(abs, rel)
+      } else if (entry.isFile()) {
+        const content = await fs.readFile(abs)
+        files[rel] = new Uint8Array(content.buffer, content.byteOffset, content.byteLength)
+      }
+    }
+  }
+
+  try {
+    await walk(workspacePath, '')
+  } catch (err) {
+    console.error('[download-zip] walk error', err)
+    return c.json({ error: 'Failed to read workspace' }, 500)
+  }
+
+  if (Object.keys(files).length === 0) {
+    return c.json({ error: 'Workspace is empty' }, 409)
+  }
+
+  // 延迟加载 fflate，避免在无 zip 请求时占用内存
+  const { zipSync } = await import('fflate')
+  let zipped: Uint8Array
+  try {
+    zipped = zipSync(files, { level: 6 })
+  } catch (err) {
+    console.error('[download-zip] zip error', err)
+    return c.json({ error: 'Failed to compress files' }, 500)
+  }
+
+  const safeName = (appId || 'source').replace(/[^a-zA-Z0-9_-]/g, '_')
+  c.header('Content-Type', 'application/zip')
+  c.header('Content-Disposition', `attachment; filename="${safeName}-source.zip"`)
+  return c.body(zipped as unknown as ArrayBuffer, 200)
+})
+
 export default tasks
