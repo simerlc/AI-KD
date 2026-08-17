@@ -1,0 +1,6 @@
+export { TaskChat } from './task-chat'
+export type { TaskChatProps } from './task-chat'
+export { useChatStream } from './use-chat-stream'
+export type { UseChatStreamReturn, UseChatStreamOptions, ChatMessage, SendMessageOptions } from './use-chat-stream'
+export { AcpClient, isAcpNotification, isAcpRequest } from './acp-client'
+export type { AcpMessageHandler, SendPromptOptions } from './acp-client'

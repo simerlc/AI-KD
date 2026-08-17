@@ -1,0 +1,56 @@
+# Dependencies
+node_modules/
+.pnpm-store/
+
+# Build output
+dist/
+*.tsbuildinfo
+.turbo/
+
+# Logs
+*.log
+npm-debug.log*
+pnpm-debug.log*
+server-debug.log
+web-dev.log
+
+# Environment (contains secrets - DO NOT COMMIT)
+.env
+.env.local
+.env.*.local
+**/.env
+**/.env.local
+
+# Database
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+data/
+data-*/
+**/data/
+**/data-*/
+
+# Generated workspaces (sandbox outputs)
+workspaces/
+**/workspaces/
+packages/server/workspaces/
+
+# Temp
+_tmp_*/
+tmp/
+.temp/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor
+.vscode/*
+!.vscode/extensions.json
+.idea/
+*.swp
+
+# Coverage
+coverage/
+.nyc_output/

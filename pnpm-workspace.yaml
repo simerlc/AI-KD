@@ -1,0 +1,10 @@
+packages:
+  - packages/*
+
+ignoredBuiltDependencies:
+  - better-sqlite3
+  - core-js-pure
+  - cos-js-sdk-v5
+  - esbuild
+  - sharp
+  - unrs-resolver
