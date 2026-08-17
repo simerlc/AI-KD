@@ -41,6 +41,9 @@ _tmp_*/
 tmp/
 .temp/
 
+# Playwright CLI debug artifacts
+.playwright-cli/
+
 # OS
 .DS_Store
 Thumbs.db
