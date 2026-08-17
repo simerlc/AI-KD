@@ -76,6 +76,8 @@ interface FileBrowserProps {
   branchName?: string | null
   repoUrl?: string | null
   sandboxId?: string | null
+  /** When the sandbox/preview workspace has generated files but no sandboxId is provided yet */
+  workspaceReady?: boolean
   onFileSelect?: (filename: string, isFolder?: boolean) => void
   onFilesLoaded?: (filenames: string[]) => void
   selectedFile?: string
@@ -90,6 +92,7 @@ export function FileBrowser({
   branchName,
   repoUrl,
   sandboxId,
+  workspaceReady = false,
   onFileSelect,
   onFilesLoaded,
   selectedFile,
@@ -98,9 +101,9 @@ export function FileBrowser({
   onViewModeChange,
   hideHeader = false,
 }: FileBrowserProps) {
-  // When no branch but sandbox exists, force local-only mode
+  // When no branch but workspace files exist, force local-only mode
   const hasBranch = !!(branchName && branchName.trim().length > 0)
-  const sandboxOnly = !hasBranch && !!sandboxId
+  const sandboxOnly = !hasBranch && (!!sandboxId || workspaceReady)
   const viewMode = sandboxOnly ? 'all-local' : viewModeProp
   // Use Jotai atom for state management
   const taskStateAtom = useMemo(() => getTaskFileBrowserState(taskId), [taskId])
@@ -301,7 +304,7 @@ export function FileBrowser({
   )
 
   const fetchBranchFiles = useCallback(async () => {
-    if (!hasBranch && !sandboxId) return
+    if (!hasBranch && !sandboxId && !workspaceReady) return
 
     const isInitialLoad = files.length === 0 && !fetchAttempted
 
@@ -433,7 +436,7 @@ export function FileBrowser({
   ])
 
   const handleSyncChanges = useCallback(async () => {
-    if (isSyncing || (!hasBranch && !sandboxId)) return
+    if (isSyncing || (!hasBranch && !sandboxId && !workspaceReady)) return
 
     setIsSyncing(true)
     setShowSyncDialog(false)
@@ -468,7 +471,7 @@ export function FileBrowser({
   }, [isSyncing, branchName, taskId, syncCommitMessage, viewMode, currentViewData, setState])
 
   const handleResetChanges = useCallback(async () => {
-    if (isResetting || (!hasBranch && !sandboxId)) return
+    if (isResetting || (!hasBranch && !sandboxId && !workspaceReady)) return
 
     setIsResetting(true)
     setShowCommitMessageDialog(false)
@@ -655,18 +658,18 @@ export function FileBrowser({
   )
 
   useEffect(() => {
-    if ((hasBranch || sandboxId) && files.length === 0 && !loading && !fetchAttempted) {
+    if ((hasBranch || sandboxId || workspaceReady) && files.length === 0 && !loading && !fetchAttempted) {
       fetchBranchFiles()
     }
-  }, [hasBranch, sandboxId, files.length, loading, fetchAttempted, fetchBranchFiles])
+  }, [hasBranch, sandboxId, workspaceReady, files.length, loading, fetchAttempted, fetchBranchFiles])
 
   useEffect(() => {
-    if ((hasBranch || sandboxId) && refreshKey !== undefined && refreshKey > 0) {
+    if ((hasBranch || sandboxId || workspaceReady) && refreshKey !== undefined && refreshKey > 0) {
       setState({ [viewMode]: { ...currentViewData, fetchAttempted: false } })
       fetchBranchFiles()
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [refreshKey, hasBranch, sandboxId])
+  }, [refreshKey, hasBranch, sandboxId, workspaceReady])
 
   // Helper: update a nested node in fileTree by path
   const updateTreeNode = useCallback(
@@ -1240,7 +1243,7 @@ export function FileBrowser({
     })
   }
 
-  if (!hasBranch && !sandboxId) {
+  if (!hasBranch && !sandboxId && !workspaceReady) {
     return (
       <div className="flex flex-col h-full">
         <div className="p-3 md:p-4 border-b">

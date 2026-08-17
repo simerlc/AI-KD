@@ -167,16 +167,26 @@ export function TaskDetails({
   })
 
   const currentStatus = optimisticStatus ?? task.status
-  const hasFilesSupport = hasBranch || !!task.sandboxId
-  const showCodeViewer = (showCodePane && hasBranch) || (!!selectedFile && showFilesPane)
+  // 运行时真实状态值为 done/created（见 acp.ts），但类型枚举为 completed/processing。
+  // 用字符串宽松比较以兼容两种表示。
+  const rawStatus = String(currentStatus)
+  const isNotStarted = rawStatus === 'pending' || rawStatus === 'created'
+  const isDone = rawStatus === 'done' || rawStatus === 'completed'
+  const workspaceReady = !!(
+    task.previewUrl ||
+    task.sandboxUrl ||
+    task.appModelId ||
+    isDone
+  )
+  const hasFilesSupport = hasBranch || !!task.sandboxId || workspaceReady
+  const showCodeViewer = (showCodePane && (hasBranch || workspaceReady)) || (!!selectedFile && showFilesPane)
 
   // 历史记录可能 previewUrl 为 null（后端重启后沙箱进程丢失/生成时未回写）。
-  // 任务状态枚举：pending/created（未开始生成）、done（完成）、error/stopped（可能已有部分产物）。
+  // 任务状态枚举：pending/created（未开始）、done/completed（完成）、error/stopped（可能已有部分产物）。
   // 除未开始的任务外，一律调用 /preview-url 接口，由后端判断 workspace 是否有文件并自动启动沙箱。
   const canLoadPreview =
-    task.status !== 'pending' &&
-    task.status !== 'created' &&
-    (!!task.previewUrl || !!task.sandboxId || !!task.appModelId || task.status === 'done')
+    !isNotStarted &&
+    (!!task.previewUrl || !!task.sandboxId || !!task.appModelId || isDone)
 
   const loadPreviewGatewayUrl = useCallback(async () => {
     if (!canLoadPreview) return
@@ -481,6 +491,7 @@ export function TaskDetails({
               branchName={task.branchName}
               repoUrl={task.repoUrl}
               sandboxId={task.sandboxId}
+              workspaceReady={workspaceReady}
               onFileSelect={openFileInTab}
               onFilesLoaded={fetchAllDiffs}
               selectedFile={selectedFile ?? undefined}

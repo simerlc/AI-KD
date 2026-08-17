@@ -1,4 +1,4 @@
-import { Hono } from 'hono'
+import { Context, Hono } from 'hono'
 import { getDb } from '../db/index.js'
 import { nanoid } from 'nanoid'
 import { requireAuth, type AppEnv } from '../middleware/auth'
@@ -6,6 +6,8 @@ import { loadTaskMessagesPage } from '../agent/message-history.service.js'
 import { getSandbox } from '../sandbox/index.js'
 import { getWorkspacePath } from '../lib/workspace.js'
 import fs from 'node:fs/promises'
+import path from 'node:path'
+import { existsSync } from 'node:fs'
 
 const tasks = new Hono<AppEnv>()
 
@@ -327,6 +329,270 @@ tasks.get('/:taskId/deployments', async (c) => {
 
   const deployments = await getDb().deployments.findByTaskId(taskId)
   return c.json({ deployments })
+})
+
+// ─── Workspace File APIs ─────────────────────────────────────
+// 用于前端文件浏览器读取/编辑预览应用的源码文件结构。
+
+const ALLOWED_FILE_EXTENSIONS = new Set([
+  '.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs',
+  '.html', '.css', '.scss', '.less', '.json',
+  '.md', '.txt', '.yaml', '.yml', '.svg',
+])
+const IGNORED_ENTRIES = new Set(['node_modules', '.git', 'dist', 'build', '.cache'])
+
+async function resolveTaskWorkspace(c: Context<AppEnv>, taskId: string) {
+  const authErr = requireAuth(c)
+  if (authErr) return { authErr }
+
+  const session = c.get('session')!
+  const task = await getDb().tasks.findByIdAndUserId(taskId, session.user.id)
+  if (!task) return { error: 'Task not found', status: 404 }
+
+  // 工作区目录以 session/task id 命名（见 acp.ts 中 writeWorkspaceFiles(sessionId, ...)），
+  // 因此直接以 taskId 作为工作区路径，而非 appModelId。
+  const appId = taskId
+  const workspacePath = path.resolve(getWorkspacePath(appId))
+  if (!existsSync(workspacePath)) return { error: 'Workspace not ready', status: 409 }
+  return { workspacePath, task, appId }
+}
+
+function normalizeRelativePath(raw?: string | string[]): string {
+  if (!raw) return ''
+  const value = Array.isArray(raw) ? raw[0] : raw
+  const normalized = path.normalize(decodeURIComponent(value)).replace(/\\+/g, '/')
+  if (normalized.startsWith('..')) return ''
+  if (normalized.startsWith('/')) return normalized.slice(1)
+  return normalized
+}
+
+function isInsideWorkspace(workspacePath: string, targetPath: string): boolean {
+  const resolvedWorkspace = path.resolve(workspacePath)
+  const resolvedTarget = path.resolve(targetPath)
+  return resolvedTarget === resolvedWorkspace || resolvedTarget.startsWith(resolvedWorkspace + path.sep)
+}
+
+tasks.get('/:taskId/files/list-dir', async (c) => {
+  const result = await resolveTaskWorkspace(c, c.req.param('taskId'))
+  if ('authErr' in result && result.authErr) return result.authErr
+  if ('error' in result && result.error) return c.json({ error: result.error }, result.status as 404 | 409)
+
+  const { workspacePath } = result
+  const rawPath = c.req.query('path')
+  const relativePath = normalizeRelativePath(rawPath)
+  const targetPath = relativePath ? path.join(workspacePath, relativePath) : workspacePath
+
+  if (!isInsideWorkspace(workspacePath, targetPath)) {
+    return c.json({ error: 'Invalid path' }, 400)
+  }
+
+  if (!existsSync(targetPath)) {
+    return c.json({ error: 'Directory not found' }, 404)
+  }
+
+  try {
+    const stat = await fs.stat(targetPath)
+    if (!stat.isDirectory()) {
+      return c.json({ error: 'Not a directory' }, 400)
+    }
+
+    const names = await fs.readdir(targetPath)
+
+    const entries: { name: string; type: 'file' | 'directory'; path: string }[] = []
+
+    for (const name of names.sort((a, b) => a.localeCompare(b))) {
+      if (IGNORED_ENTRIES.has(name)) continue
+      const childPath = relativePath ? `${relativePath}/${name}` : name
+      const fullPath = path.join(targetPath, name)
+      try {
+        const childStat = await fs.stat(fullPath)
+        if (childStat.isDirectory()) {
+          entries.push({ name, type: 'directory', path: childPath })
+        } else if (childStat.isFile()) {
+          entries.push({ name, type: 'file', path: childPath })
+        }
+      } catch {
+        // skip entries we can't stat
+      }
+    }
+
+    return c.json({ success: true, entries })
+  } catch (err) {
+    console.error('[files:list-dir] error', err)
+    return c.json({ error: 'Failed to list directory' }, 500)
+  }
+})
+
+tasks.get('/:taskId/files/download', async (c) => {
+  const result = await resolveTaskWorkspace(c, c.req.param('taskId'))
+  if ('authErr' in result && result.authErr) return result.authErr
+  if ('error' in result && result.error) return c.json({ error: result.error }, result.status as 404 | 409)
+
+  const { workspacePath } = result
+  const rawPath = c.req.query('path')
+  const relativePath = normalizeRelativePath(rawPath)
+  if (!relativePath) {
+    return c.json({ error: 'Path is required' }, 400)
+  }
+
+  const targetPath = path.join(workspacePath, relativePath)
+  if (!isInsideWorkspace(workspacePath, targetPath)) {
+    return c.json({ error: 'Invalid path' }, 400)
+  }
+
+  if (!existsSync(targetPath)) {
+    return c.json({ error: 'File not found' }, 404)
+  }
+
+  try {
+    const stat = await fs.stat(targetPath)
+    if (!stat.isFile()) {
+      return c.json({ error: 'Not a file' }, 400)
+    }
+
+    const content = await fs.readFile(targetPath, 'utf-8')
+    const ext = path.extname(targetPath).toLowerCase()
+    const isText = ALLOWED_FILE_EXTENSIONS.has(ext) || !/ /.test(content.slice(0, 1024))
+    c.header('Content-Disposition', `attachment; filename="${path.basename(targetPath)}"`)
+    c.header('Content-Type', isText ? 'text/plain; charset=utf-8' : 'application/octet-stream')
+    return c.body(content)
+  } catch (err) {
+    console.error('[files:download] error', err)
+    return c.json({ error: 'Failed to download file' }, 500)
+  }
+})
+
+tasks.post('/:taskId/files/save', async (c) => {
+  const result = await resolveTaskWorkspace(c, c.req.param('taskId'))
+  if ('authErr' in result && result.authErr) return result.authErr
+  if ('error' in result && result.error) return c.json({ error: result.error }, result.status as 404 | 409)
+
+  const { workspacePath } = result
+  const body = await c.req.json<{ path: string; content: string }>()
+  const relativePath = normalizeRelativePath(body.path)
+  if (!relativePath) {
+    return c.json({ error: 'Path is required' }, 400)
+  }
+
+  const targetPath = path.join(workspacePath, relativePath)
+  if (!isInsideWorkspace(workspacePath, targetPath)) {
+    return c.json({ error: 'Invalid path' }, 400)
+  }
+
+  const ext = path.extname(targetPath).toLowerCase()
+  if (!ALLOWED_FILE_EXTENSIONS.has(ext)) {
+    return c.json({ error: 'File type not allowed' }, 400)
+  }
+
+  try {
+    await fs.mkdir(path.dirname(targetPath), { recursive: true })
+    await fs.writeFile(targetPath, body.content, 'utf-8')
+    return c.json({ success: true })
+  } catch (err) {
+    console.error('[files:save] error', err)
+    return c.json({ error: 'Failed to save file' }, 500)
+  }
+})
+
+// Legacy frontend endpoints used by the code editor / diff viewer
+const EXT_TO_LANGUAGE: Record<string, string> = {
+  '.ts': 'typescript', '.tsx': 'tsx', '.js': 'javascript', '.jsx': 'javascript',
+  '.mjs': 'javascript', '.cjs': 'javascript', '.html': 'html', '.css': 'css',
+  '.scss': 'scss', '.less': 'less', '.json': 'json', '.md': 'markdown',
+  '.yaml': 'yaml', '.yml': 'yaml', '.svg': 'xml', '.txt': 'plaintext',
+}
+
+function detectLanguage(filename: string): string {
+  const ext = path.extname(filename).toLowerCase()
+  return EXT_TO_LANGUAGE[ext] || 'plaintext'
+}
+
+function isTextFile(fullPath: string, content: Buffer): boolean {
+  if (!ALLOWED_FILE_EXTENSIONS.has(path.extname(fullPath).toLowerCase())) {
+    return false
+  }
+  return !content.slice(0, 1024).includes(0)
+}
+
+tasks.get('/:taskId/file-content', async (c) => {
+  const result = await resolveTaskWorkspace(c, c.req.param('taskId'))
+  if ('authErr' in result && result.authErr) return result.authErr
+  if ('error' in result && result.error) return c.json({ error: result.error }, result.status as 404 | 409)
+
+  const { workspacePath } = result
+  const rawFilename = c.req.query('filename')
+  const relativePath = normalizeRelativePath(rawFilename)
+  if (!relativePath) {
+    return c.json({ error: 'filename is required' }, 400)
+  }
+
+  const targetPath = path.join(workspacePath, relativePath)
+  if (!isInsideWorkspace(workspacePath, targetPath)) {
+    return c.json({ error: 'Invalid filename' }, 400)
+  }
+
+  if (!existsSync(targetPath)) {
+    return c.json({ error: 'File not found' }, 404)
+  }
+
+  try {
+    const stat = await fs.stat(targetPath)
+    if (!stat.isFile()) {
+      return c.json({ error: 'Not a file' }, 400)
+    }
+
+    const buffer = await fs.readFile(targetPath)
+    const ext = path.extname(targetPath).toLowerCase()
+    const isImage = ['.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.svg'].includes(ext)
+    const isBinary = !isTextFile(targetPath, buffer)
+    const language = detectLanguage(targetPath)
+
+    const data = {
+      filename: relativePath,
+      oldContent: '',
+      newContent: isBinary ? buffer.toString('base64') : buffer.toString('utf-8'),
+      language,
+      isBinary,
+      isImage,
+      isBase64: isBinary,
+    }
+    return c.json({ success: true, data })
+  } catch (err) {
+    console.error('[file-content] error', err)
+    return c.json({ error: 'Failed to read file' }, 500)
+  }
+})
+
+tasks.post('/:taskId/save-file', async (c) => {
+  const result = await resolveTaskWorkspace(c, c.req.param('taskId'))
+  if ('authErr' in result && result.authErr) return result.authErr
+  if ('error' in result && result.error) return c.json({ error: result.error }, result.status as 404 | 409)
+
+  const { workspacePath } = result
+  const body = await c.req.json<{ filename: string; content: string }>()
+  const relativePath = normalizeRelativePath(body.filename)
+  if (!relativePath) {
+    return c.json({ error: 'filename is required' }, 400)
+  }
+
+  const targetPath = path.join(workspacePath, relativePath)
+  if (!isInsideWorkspace(workspacePath, targetPath)) {
+    return c.json({ error: 'Invalid filename' }, 400)
+  }
+
+  const ext = path.extname(targetPath).toLowerCase()
+  if (!ALLOWED_FILE_EXTENSIONS.has(ext)) {
+    return c.json({ error: 'File type not allowed' }, 400)
+  }
+
+  try {
+    await fs.mkdir(path.dirname(targetPath), { recursive: true })
+    await fs.writeFile(targetPath, body.content, 'utf-8')
+    return c.json({ success: true })
+  } catch (err) {
+    console.error('[save-file] error', err)
+    return c.json({ error: 'Failed to save file' }, 500)
+  }
 })
 
 export default tasks
