@@ -7,7 +7,8 @@
 - **目标**: 通过自然语言生成 App Model → 由 Agent 生成 React 应用并支持本地沙箱预览与版本管理。参考计划: [AIKD-V1-PLAN.md](AIKD-V1-PLAN.md)
 - **后端框架**: Hono + @hono/node-server，运行于 Node ≥ 22
 - **数据库**: SQLite（better-sqlite3 + drizzle-orm）
-- **LLM 接入**: OpenAI 兼容接口（兼容 Ollama / DashScope / 本地服务）
+- **LLM 接入**: OpenAI 兼容接口（兼容 DeepSeek / OpenAI / Anthropic / Gemini / Qwen / 自定义 OpenAI Compatible Provider）
+- **模型管理**: 内置 + 自定义 Provider 统一管理，支持 API Key 配置、连接测试、动态切换与持久化（`~/.aikd/providers.json`）
 
 ---
 
@@ -52,8 +53,15 @@ server/src/
 ├── routes/           # HTTP 路由层
 │   ├── acp.ts        #   ACP 协议 / SSE 流式生成（对话入口）
 │   ├── tasks.ts      #   任务（应用）与预览管理
+│   ├── data.ts       #   通用数据 API（/api/data，供生成应用读写）
+│   ├── providers.ts  #   Provider 管理 API（/api/providers）
 │   ├── auth.ts       #   认证（默认本地账号）
 │   └── misc.ts       #   杂项 / 健康检查
+├── providers/        # AI Provider 管理（内置 + 自定义 + 测试 + 持久化）
+│   ├── types.ts      #   ModelProvider / ModelConfig 类型定义
+│   ├── builtin.ts    #   内置 Provider 定义（DeepSeek/OpenAI/Anthropic/Gemini/Qwen）
+│   ├── storage.ts    #   JSON 文件持久化（~/.aikd/providers.json）+ 内存缓存
+│   └── test.ts       #   测试连接（服务端发起 OpenAI Compatible 请求）
 ├── sandbox/          # 沙箱实现与端口分配
 │   ├── index.ts              #   沙箱工厂 / 统一接口
 │   ├── local-node-sandbox.ts #   Node 本地子进程模式（默认，无需 Docker）
@@ -122,6 +130,8 @@ pnpm --filter @aikd/server dev
 | `SANDBOX_PORT_RANGE_START` / `_END` | 沙箱预览端口范围（默认 `5173–5199`） | `5173` / `5199` |
 | `WORKSPACE_ROOT` | 生成代码工作区根目录（默认 `packages/server/workspaces`） | - |
 
+> **说明**：`LLM_API_KEY` / `LLM_BASE_URL` / `LLM_MODEL` 为**默认 Provider 配置**。当任务未指定 Provider（或指定 Provider 未配置 key）时，作为回退使用。若在「模型」页面配置了对应 Provider，则优先使用该 Provider 的配置。
+
 ---
 
 ## 核心概念
@@ -151,12 +161,42 @@ pnpm --filter @aikd/server dev
 ### 预览桥（iframe 通信）
 前端预览 iframe 通过 `postMessage` 与应用通信（HMR 状态、导航、构建错误、RPC）。实现见 `packages/web/src/hooks/use-preview-bridge.ts`。
 
+### 模型 / AI Provider 管理
+平台通过「模型」页面（`/models`）统一管理 LLM Provider，配置后即可在生成任务时选择模型。
+
+**数据流与分层**：
+```
+React UI (ModelProviderPage / ProviderCard / ProviderForm ...)
+     ↓
+jotai Atoms (loadProviders / addProvider / updateProvider / testProvider / selectModel)
+     ↓
+Provider API Client (packages/web/src/lib/providers/api.ts)
+     ↓
+Backend /api/providers (routes/providers.ts)
+     ↓
+Provider Storage (providers/storage.ts → ~/.aikd/providers.json)
+     ↓
+LLM Provider (按所选配置动态实例化 OpenAICompatibleProvider)
+     ↓
+OpenAI Compatible /chat/completions
+```
+
+**关键点**：
+
+1. **内置 Provider**：`providers/builtin.ts` 定义 5 个内置 Provider（DeepSeek/OpenAI/Anthropic/Gemini/Qwen），不允许删除；可通过「编辑」填入 key 使用。
+2. **自定义 Provider**：支持任意 OpenAI Compatible API，`providers/storage.ts` 负责持久化。
+3. **测试连接**：`providers/test.ts` 在**服务端**发起最小 `/chat/completions` 请求（`Hello`），返回友好的错误信息（API Key 无效 / Base URL 无法访问 / Model 不存在 / 连接超时）。
+4. **API Key 安全**：key 仅存于服务端 `~/.aikd/providers.json`，API 返回时通过 `toPublicProvider` **脱敏**（只返回 `hasApiKey` 布尔值）；前端不持久化密钥，编辑时占位「已配置，留空保持不变」。
+5. **模型选择**：首页任务表单模型下拉按「Provider / 模型」层级展示可用模型（`packages/web/src/components/task-form.tsx` 的 `ProviderModelSelect`）。
+6. **动态 LLM**：任务以 `providerId::modelId` 格式保存 `selectedModel`，`routes/acp.ts` 的 `handleSessionPrompt` 通过 `createProviderFromModel` 按所选 Provider 配置动态创建 LLM Provider。
+
 ---
 
 ## 开发流程与常见任务
 
 ### 新建应用流程
-1. 用户在前端输入自然语言需求 → 前端调用 ACP `session/prompt`
+0. （可选）用户先在「模型」页面配置 Provider 并选择模型
+1. 用户在前端输入自然语言需求（模型下拉选中 `providerId::modelId`）→ 前端创建任务并调用 ACP `session/prompt`
 2. `Planner` 生成 App Model（写入 `app_models` 表）
 3. `Builder` 生成代码，`writeWorkspaceFiles` 写入 `workspaces/{appId}`（**写入前会清理旧源码，避免旧文件残留**）
 4. 启动/重建沙箱（生成完成后总是销毁旧沙箱重新启动，确保加载最新代码）
@@ -234,6 +274,7 @@ pnpm lint         # ESLint
 ## 安全与敏感信息
 
 - 不要在仓库中提交 `LLM_API_KEY` 或任何密钥。将敏感信息放入 CI/环境变量或本地 `.env`（并确保 `.gitignore` 排除）。
+- **Provider API Key**：各 Provider 的 key 保存在服务端 `~/.aikd/providers.json`（**不在版本控制内**，该文件位于用户主目录）。API 返回时一律脱敏，前端与浏览器存储均不持有明文 key。若需在生产环境加固，可替换 `packages/server/src/providers/storage.ts` 为加密存储（如 KMS / 数据库密文），不影响上层代码。
 
 ---
 
@@ -244,4 +285,7 @@ pnpm lint         # ESLint
 ---
 
 ## 后续计划
-使生成的应用不再只是简单的web页面，能够实现一些功能
+
+- **模型能力增强**：接入更多 Provider 专属能力（函数调用 / 视觉 / 推理），支持流式输出在生成过程的实时展示
+- **Provider 加密存储**：将服务端 `providers/storage.ts` 从明文 JSON 升级为加密存储（数据库密文 / KMS），进一步提升密钥安全
+- **生成应用能力扩展**：使生成的应用不再只是简单的 web 页面，能够实现更完整的业务功能

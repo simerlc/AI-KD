@@ -25,7 +25,7 @@ AIKD-V1/
 ├── scripts/               # 仓库级脚本（初始化、构建、部署）
 └── packages/
     ├── web/               # @aikd/web    前端（React 19 + Vite）
-    ├── server/            # @aikd/server 后端（Hono + SQLite + 沙箱）
+    ├── server/            # @aikd/server 后端（Hono + SQLite + 沙箱 + Provider 管理）
     ├── shared/            # @aikd/shared 共享类型与协议定义
     ├── app-engine/        # @aikd/app-engine App Model schema / 校验 / 版本 / 模板
     ├── component-registry/# @aikd/component-registry 内置组件 + props schema
@@ -40,7 +40,8 @@ AIKD-V1/
 - **前端**：React 19 + Vite
 - **后端**：Hono + `@hono/node-server`（Node ≥ 22）
 - **数据库**：SQLite（better-sqlite3 + drizzle-orm）
-- **LLM**：OpenAI 兼容接口（兼容 DeepSeek / 智谱 / Ollama / 本地服务）
+- **LLM**：OpenAI 兼容接口（兼容 DeepSeek / OpenAI / Anthropic / Gemini / Qwen / 自定义 OpenAI Compatible Provider）
+- **模型管理**：内置 Provider + 自定义 Provider，支持 API Key 配置、连接测试、动态切换与持久化
 - **沙箱预览**：Node 本地子进程（默认）或 Docker 容器，每应用独立 Vite Dev Server
 
 ## 快速开始
@@ -61,6 +62,45 @@ pnpm --filter @aikd/server dev
 ```
 
 环境变量（LLM、端口、沙箱等）在 `packages/server/.env` 中配置，详见 [DEVELOPER.md · 环境变量](DEVELOPER.md#环境变量)。
+
+## 模型配置（AI Provider）
+
+平台支持在「模型」页面（`/models`）统一管理 LLM Provider，配置后即可在生成任务时选择对应模型。
+
+### 内置 Provider
+
+默认内置 5 个 Provider，可通过「编辑」填入 API Key / Base URL / 模型名后使用：
+
+- **DeepSeek** (`deepseek`)
+- **OpenAI** (`openai`)
+- **Anthropic** (`anthropic`)
+- **Google Gemini** (`gemini`)
+- **Qwen** (`qwen`)
+
+内置 Provider 不允许删除。
+
+### 自定义 Provider
+
+支持配置任意 **OpenAI Compatible API**（`POST {baseUrl}/chat/completions`）：
+
+| 字段 | 说明 |
+|------|------|
+| 名称 | 自定义 Provider 显示名 |
+| API Base URL | OpenAI 兼容端点，如 `https://api.deepseek.com/v1` |
+| API Key | 服务端存储，前端不持久化明文 |
+| 模型 | 模型名称，如 `deepseek-chat` |
+
+### 配置持久化
+
+- Provider 配置保存在 **服务端**（`~/.aikd/providers.json`），由 `/api/providers` 提供 CRUD 与测试接口
+- API Key 以明文仅存于服务端文件，**API 返回时脱敏**（只返回 `hasApiKey` 布尔值），前端不持久化密钥
+- 刷新页面后配置不丢失
+
+### 模型选择与生成
+
+- 首页任务表单的模型下拉会按「Provider / 模型」层级展示所有可用模型
+- 选中的模型以 `providerId::modelId` 格式随任务提交
+- 后端按所选 Provider 的配置动态创建 LLM Client，业务代码不感知具体 Provider 实现
 
 ## 常用脚本
 
