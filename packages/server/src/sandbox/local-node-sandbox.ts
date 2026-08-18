@@ -61,11 +61,19 @@ export class LocalNodeSandbox {
     await this.runNpmInstall(absWorkspace)
 
     // 4. 启动 Vite Dev Server
+    // 注入 VITE_API_TARGET 指向后端 Data API 真实地址，
+    // 让生成的应用里 /api 请求能代理到宿主机后端（而非容器内部）。
+    const backendPort = Number(process.env.PORT) || 3001
+    const apiTarget = process.env.VITE_API_TARGET || `http://localhost:${backendPort}`
     const child = spawn('npx', ['vite', '--host', '0.0.0.0', '--port', String(hostPort), '--strictPort'], {
       cwd: absWorkspace,
       shell: true,
       windowsHide: true,
       stdio: ['ignore', 'pipe', 'pipe'],
+      env: {
+        ...process.env,
+        VITE_API_TARGET: apiTarget,
+      },
     })
 
     child.on('error', () => {

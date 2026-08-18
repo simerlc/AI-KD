@@ -106,3 +106,33 @@ export const Table: ComponentDefinition = {
     },
   ],
 }
+
+export const Detail: ComponentDefinition = {
+  type: 'Detail',
+  name: '详情',
+  category: 'display',
+  description:
+    '详情组件，根据路由参数 :id 从数据源加载单条记录并展示其字段，常用于数据的详情页。',
+  acceptsChildren: false,
+  defaultProps: {
+    dataSource: '',
+    fields: [],
+    title: '',
+  },
+  propsSchema: [
+    {
+      name: 'dataSource',
+      type: 'string',
+      description: '数据源名称（如 database.customers），详情会根据 :id 加载该记录',
+      default: '',
+      required: true,
+    },
+    {
+      name: 'fields',
+      type: 'array',
+      description: '要展示的字段名数组，如 ["name","phone","company"]；留空则展示全部字段',
+      default: [],
+    },
+    { name: 'title', type: 'string', description: '详情页标题', default: '' },
+  ],
+}

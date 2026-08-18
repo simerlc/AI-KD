@@ -114,6 +114,27 @@ sqlite.exec(`
     created_at INTEGER NOT NULL
   );
   CREATE INDEX IF NOT EXISTS app_versions_app_id_idx ON app_versions(app_id);
+
+  CREATE TABLE IF NOT EXISTS data_models (
+    id TEXT PRIMARY KEY,
+    app_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+    name TEXT NOT NULL,
+    fields_json TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS data_models_app_name_idx ON data_models(app_id, name);
+
+  CREATE TABLE IF NOT EXISTS data_records (
+    id TEXT PRIMARY KEY,
+    app_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+    table_id TEXT NOT NULL REFERENCES data_models(id) ON DELETE CASCADE,
+    data_json TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS data_records_table_idx ON data_records(table_id);
+  CREATE INDEX IF NOT EXISTS data_records_app_table_idx ON data_records(app_id, table_id);
 `)
 
 export const drizzleDb = drizzle(sqlite, { schema })

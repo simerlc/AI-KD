@@ -34,6 +34,7 @@ import { DEFAULT_USER_ID, DEFAULT_USERNAME } from './middleware/auth'
 import acpRoutes from './routes/acp'
 import tasksRoutes from './routes/tasks'
 import miscRoutes from './routes/misc'
+import dataRoutes from './routes/data'
 
 const app = new Hono<AppEnv>()
 
@@ -52,6 +53,7 @@ app.use('*', authMiddleware)
 app.get('/health', (c) => c.json({ status: 'ok' }))
 app.route('/api/agent', acpRoutes)
 app.route('/api/tasks', tasksRoutes)
+app.route('/api/data', dataRoutes)
 app.route('/api', miscRoutes)
 
 // Static file serving for production (web build output)

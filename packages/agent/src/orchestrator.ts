@@ -26,6 +26,8 @@ import { registry } from '@aikd/component-registry'
 export interface RunOptions {
   /** 用户需求描述 */
   prompt: string
+  /** 应用 ID（task/session id），透传给 Builder 用于生成与后端一致的数据表主键 */
+  appId?: string
   /** 应用类型 */
   appType?: AppType
   /** 应用名称 */
@@ -124,7 +126,7 @@ export class Orchestrator {
         attempt === 0 ? '正在生成代码...' : `正在修复代码（第 ${attempt} 次重试）...`,
       )
 
-      const buildResult = await this.builder.build({ appModel, signal })
+      const buildResult = await this.builder.build({ appModel, appId: options.appId, signal })
       files = buildResult.files
 
       this.emitProgress(onProgress, 'building', `代码生成完成，共 ${files.length} 个文件`)

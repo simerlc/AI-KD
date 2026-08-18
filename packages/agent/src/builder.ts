@@ -10,40 +10,93 @@ import { generateId } from './utils'
 
 export interface BuilderOptions {
   appModel: AppModel
+  /** 应用 ID（task/session id），用于生成与后端一致的数据表主键 */
+  appId?: string
   signal?: AbortSignal
+}
+
+/** 页面级能力扫描结果（决定注入哪些 import / state / handler） */
+interface PageAnalysis {
+  sources: string[]
+  needsDelete: boolean
+  needsGet: boolean
+  needsUpdate: boolean
+  hasTable: boolean
+  hasSearchableTable: boolean
+  tableActions: string[]
+  hasDetail: boolean
+  hasFormWithParam: boolean
+  formParamId?: string
+  formDataSource?: string
 }
 
 export class BuilderAgent {
   constructor(private llm: LLMClient) {}
 
   async build(options: BuilderOptions): Promise<{ files: GeneratedFile[] }> {
-    const { appModel } = options
+    const { appModel, appId } = options
+
+    // ── 结构归一化：兼容 LLM 输出的常见偏差（顶层 pages/dataSources / 缺失 schema 包裹等）──
+    const normalized = this.normalizeAppModel(appModel)
+
     const files: GeneratedFile[] = []
 
     // 1. 静态配置文件
-    files.push(this.generatePackageJson(appModel))
-    files.push(this.generateIndexHtml(appModel))
+    files.push(this.generatePackageJson(normalized))
+    files.push(this.generateIndexHtml(normalized))
     files.push(this.generateViteConfig())
     files.push(this.generateTsConfig())
 
     // 2. 入口文件
     files.push(this.generateMainTsx())
-    files.push(this.generateIndexCss(appModel))
+    files.push(this.generateIndexCss(normalized))
 
     // 3. App 根组件（含路由）
-    files.push(this.generateAppTsx(appModel))
+    files.push(this.generateAppTsx(normalized))
 
     // 4. 页面组件
-    for (const page of appModel.schema.pages) {
-      files.push(this.generatePageComponent(page, appModel))
+    for (const page of normalized.schema.pages) {
+      files.push(this.generatePageComponent(page, normalized))
     }
 
     // 5. 数据源文件
-    if (appModel.schema.dataSources.length > 0) {
-      files.push(this.generateDataFile(appModel))
+    if (normalized.schema.dataSources.length > 0) {
+      files.push(this.generateDataFile(normalized, appId))
     }
 
     return { files }
+  }
+
+  /**
+   * 将 LLM 生成的 App Model 归一化为 Builder 期望的稳定结构。
+   * 兼容：pages/dataSources 放在顶层而非 schema 下、schema 字段缺失等情况。
+   */
+  private normalizeAppModel(appModel: AppModel): AppModel {
+    const root = (appModel as unknown) as Record<string, unknown>
+    const schemaLike = (root.schema as Record<string, unknown>) || {}
+    const pickArray = (keys: string[]): unknown[] => {
+      for (const k of keys) {
+        const v = (root[k] ?? schemaLike[k]) as unknown
+        if (Array.isArray(v)) return v
+      }
+      return []
+    }
+    const pages = pickArray(['schema.pages', 'pages', 'schemaPages']) as AppModel['schema']['pages']
+    const routes = pickArray(['schema.routes', 'routes']) as AppModel['schema']['routes']
+    const dataSources = pickArray(['schema.dataSources', 'dataSources']) as AppModel['schema']['dataSources']
+    const theme = (schemaLike.theme ?? root.theme ?? {}) as AppModel['schema']['theme']
+
+    return {
+      ...(appModel as unknown as Record<string, unknown>),
+      id: appModel.id || (root.id as string) || 'app',
+      name: appModel.name || (root.name as string) || '应用',
+      schema: {
+        pages: pages || [],
+        routes: routes || [],
+        theme: theme || { primaryColor: '#1677ff', mode: 'light' },
+        dataSources: dataSources || [],
+      },
+    } as AppModel
   }
 
   // ─── 静态文件生成 ──────────────────────────────────────
@@ -105,11 +158,21 @@ export class BuilderAgent {
       content: `import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 
+// 后端 API 地址：AI快搭 统一 Data API
+const API_TARGET = process.env.VITE_API_TARGET || 'http://localhost:3001'
+
 export default defineConfig({
   plugins: [react()],
   server: {
     host: '0.0.0.0',
     port: 5173,
+    // 将前端 /api 请求代理到后端，让应用拥有真实的数据存取能力
+    proxy: {
+      '/api': {
+        target: API_TARGET,
+        changeOrigin: true,
+      },
+    },
   },
 })
 `,
@@ -277,20 +340,51 @@ export default function App() {
       }
     }
 
-    // 多页应用 - 简单路由
-    const imports = routes
-      .map((r) => {
-        const page = appModel.schema.pages.find((p) => p.id === r.pageId)
-        return page ? `import ${this.pageComponentName(page.id)} from './pages/${page.id}'` : ''
-      })
-      .filter(Boolean)
-      .join('\n')
+    // 多页应用 - 路由（支持动态参数 /:id）
+    // import 去重（多条路由可能指向同一页面，避免重复声明导致编译错误）
+    const importSet = new Set<string>()
+    for (const r of routes) {
+      const page = appModel.schema.pages.find((p) => p.id === r.pageId)
+      if (page) importSet.add(`import ${this.pageComponentName(page.id)} from './pages/${page.id}'`)
+    }
+    const imports = Array.from(importSet).join('\n')
 
-    const routeCases = routes
+    // 生成路由匹配逻辑：将 '/customers/:id' 编译为可匹配动态段的代码。
+    // 兜底：当列表页 path 为 '/' 时，自动注册 /<datasource-short-name> 别名
+    // （如 /customers），保证前端链接跳转能命中。
+    const aliasedRoutes: Array<{ path: string; pageId: string }> = []
+    for (const r of routes) {
+      aliasedRoutes.push(r)
+      if (r.path === '/') {
+        // 找到列表页对应的数据源（如果有），用 short name 作为别名
+        const page = appModel.schema.pages.find((p) => p.id === r.pageId)
+        if (page) {
+          const primaryDs = this.collectDataSources(page.components)[0]
+          if (primaryDs) {
+            const shortName = primaryDs.replace(/^database\./, '')
+            if (shortName && shortName !== '/') {
+              aliasedRoutes.push({ path: `/${shortName}`, pageId: r.pageId })
+            }
+          }
+        }
+      }
+    }
+    const matchLogic = aliasedRoutes
       .map((r) => {
         const page = appModel.schema.pages.find((p) => p.id === r.pageId)
-        if (!page) return ''
-        return `      case '${r.path}':\n        return <${this.pageComponentName(page.id)} />`
+        if (!page) return null
+        const segments = r.path.split('/').filter(Boolean)
+        const dynamicIdx = segments.findIndex((s) => s.startsWith(':'))
+        if (dynamicIdx >= 0) {
+          const staticPrefix = segments.slice(0, dynamicIdx).join('/')
+          const paramName = segments[dynamicIdx].slice(1)
+          return `      if (segs.length === ${segments.length} && segs.slice(0, ${dynamicIdx}).join('/') === '${staticPrefix}') {
+        return <${this.pageComponentName(page.id)} ${paramName}={segs[${dynamicIdx}]} />
+      }`
+        }
+        return `      if (path === '${r.path}') {
+        return <${this.pageComponentName(page.id)} />
+      }`
       })
       .filter(Boolean)
       .join('\n')
@@ -315,11 +409,9 @@ export default function App() {
   }
 
   const renderPage = () => {
-    switch (path) {
-${routeCases}
-      default:
-        return <div>404 - 页面未找到</div>
-    }
+    const segs = path.split('/').filter(Boolean)
+${matchLogic}
+    return <div>404 - 页面未找到</div>
   }
 
   return <div className="app">{renderPage()}</div>
@@ -334,19 +426,116 @@ ${routeCases}
     const componentName = this.pageComponentName(page.id)
     const isMobile = page.layout === 'mobile'
 
+    // 扫描页面能力：数据源、是否需要 删除/详情/更新、表格搜索等
+    const analysis = this.analyzePage(page.components)
+    const dataSources = analysis.sources
+    const hasData = dataSources.length > 0
+    const primaryDs = dataSources[0] || ''
+    const primaryState = primaryDs ? `${this.toCamelCase(primaryDs)}Data` : ''
+    const primaryLoad = primaryDs ? `load${this.capitalize(this.toCamelCase(primaryDs))}` : ''
+
     // 兜底：页面没有组件时渲染占位内容，避免预览白屏
     const componentJsx =
       page.components.length > 0
-        ? page.components.map((comp) => this.renderComponent(comp, 6)).join('\n')
+        ? page.components.map((comp) => this.renderComponent(comp, 6, undefined, appModel)).join('\n')
         : `      <div className="page-empty" style={{ padding: '48px 24px', textAlign: 'center', color: '#999999', fontSize: '14px' }}>
         <p>此页面暂无内容</p>
       </div>`
 
+    // 生成数据加载 Hook 声明（有数据源时）
+    const dataHooks = dataSources
+      .map((ds) => this.generateDataHook(ds))
+      .join('\n\n')
+
+    // 动态 API 导入
+    const apiMethods = new Set<string>(['listRecords'])
+    if (dataSources.length > 0) apiMethods.add('createRecord')
+    if (analysis.needsDelete) apiMethods.add('deleteRecord')
+    if (analysis.needsGet) apiMethods.add('getRecord')
+    if (analysis.needsUpdate) apiMethods.add('updateRecord')
+
+    // 若页面有 Form 且 Form 子树中无 Input，Builder 会生成运行时动态字段
+    // （使用 customersFallback[0] 取字段名），需把 fallback 变量也加入 import。
+    // 递归遍历整个组件树查找 Form（可能在多层 Container/Section 内）。
+    const pageHasForm = (() => {
+      const walk = (nodes: ComponentNode[]): boolean => {
+        for (const n of nodes) {
+          if (n.type === 'Form') return true
+          if (n.children && walk(n.children)) return true
+        }
+        return false
+      }
+      return walk(page.components)
+    })()
+    if (pageHasForm) {
+      for (const ds of dataSources) {
+        const dsBase = ds.replace(/^database\./, '')
+        apiMethods.add(`${this.toCamelCase(dsBase)}Fallback`)
+      }
+    }
+    const apiImportList = Array.from(apiMethods).join(', ')
+
+    // 额外状态 / handler（搜索、删除、详情/编辑取数）
+    const extraHooks: string[] = []
+    if (analysis.hasSearchableTable) {
+      extraHooks.push(`  // 列表搜索
+  const [q, setQ] = useState('')
+  const ${primaryState}Filtered = ${primaryState}.filter((r) =>
+    q.trim() === '' ? true : JSON.stringify(r.data).toLowerCase().includes(q.trim().toLowerCase()),
+  )`)
+    }
+    if (analysis.needsDelete && primaryDs) {
+      extraHooks.push(`  // 删除处理
+  const handleDelete = async (ds: string, id: string) => {
+    if (!window.confirm('确认删除该记录？')) return
+    try {
+      await deleteRecord(ds, id)
+      await ${primaryLoad}()
+    } catch (err) {
+      console.error('删除失败:', err)
+      window.alert('删除失败，请重试')
+    }
+  }`)
+    }
+    if (analysis.needsGet && primaryDs) {
+      extraHooks.push(`  // 根据路由参数 :id 加载单条记录（详情 / 编辑）
+  const [record, setRecord] = useState<{ id: string; data: Record<string, unknown> } | null>(null)
+  useEffect(() => {
+    const id = (props && props.id) || ''
+    if (!id) return
+    void (async () => {
+      try {
+        const res = await getRecord('${primaryDs}', id)
+        const rec = res.record ?? null
+        setRecord(rec)
+        // 编辑页：用记录预填表单
+        if (rec) set${this.capitalize(this.toCamelCase(primaryDs))}Form(rec.data as Record<string, unknown>)
+      } catch (err) {
+        console.error('加载记录失败:', err)
+      }
+    })()
+  }, [props && props.id])`)
+    }
+
+    const imports = hasData
+      ? `import React, { useState, useEffect } from 'react'
+import { ${apiImportList} } from '../api'`
+      : `import React from 'react'`
+
+    // 需要接收路由参数（详情 / 编辑页）时，函数签名加上 props
+    const needsProps = analysis.hasDetail || analysis.hasFormWithParam
+    const fnSignature = needsProps
+      ? `export default function ${componentName}(props: { id?: string }) {`
+      : `export default function ${componentName}() {`
+
+    const extraHookBlock = extraHooks.join('\n\n')
+
     return {
       path: `src/pages/${page.id}.tsx`,
-      content: `import React from 'react'
+      content: `${imports}
 
-export default function ${componentName}() {
+${fnSignature}
+${dataHooks}${extraHookBlock ? '\n\n' + extraHookBlock : ''}
   return (
     <div className="page" ${isMobile ? 'style={{ minHeight: "100vh", maxWidth: "480px", margin: "0 auto" }}' : ''}>
 ${componentJsx}
@@ -357,12 +546,155 @@ ${componentJsx}
     }
   }
 
+  /**
+   * 递归收集组件树中引用的数据源（Table/Form 的 dataSource prop）。
+   */
+  private collectDataSources(components: ComponentNode[]): string[] {
+    const sources = new Set<string>()
+    const walk = (nodes: ComponentNode[]) => {
+      for (const node of nodes) {
+        const ds = node.props?.dataSource
+        if (ds && typeof ds === 'string' && ds.length > 0) {
+          sources.add(ds)
+        }
+        if (node.children) walk(node.children)
+      }
+    }
+    walk(components)
+    return Array.from(sources)
+  }
+
+  /**
+   * 分析页面组件树，确定需要注入的数据访问能力与交互。
+   * 这是 Builder 的「确定性兜底」：即使 Planner 未显式提供交互，
+   * 只要组件结构表达了 CRUD 意图（Table dataSsource + actions / Detail paramId / Form paramId），
+   * Builder 都会生成可用的真实逻辑。
+   */
+  private analyzePage(components: ComponentNode[]): PageAnalysis {
+    const analysis: PageAnalysis = {
+      sources: this.collectDataSources(components),
+      needsDelete: false,
+      needsGet: false,
+      needsUpdate: false,
+      hasTable: false,
+      hasSearchableTable: false,
+      tableActions: [],
+      hasDetail: false,
+      hasFormWithParam: false,
+    }
+    const walk = (nodes: ComponentNode[]) => {
+      for (const node of nodes) {
+        const ds = node.props?.dataSource
+        const dsStr = ds && typeof ds === 'string' ? ds : ''
+        if (node.type === 'Table' && dsStr) {
+          analysis.hasTable = true
+          if (node.props.searchable !== false) analysis.hasSearchableTable = true
+          const actions = Array.isArray(node.props.actions) ? (node.props.actions as string[]) : []
+          analysis.tableActions = Array.from(new Set([...analysis.tableActions, ...actions]))
+          if (actions.includes('delete')) analysis.needsDelete = true
+        }
+        if (node.type === 'Detail' && dsStr) {
+          analysis.hasDetail = true
+          analysis.needsGet = true
+        }
+        if (node.type === 'Form' && dsStr) {
+          const paramId = node.props.paramId
+          if (typeof paramId === 'string' && paramId.startsWith(':')) {
+            analysis.hasFormWithParam = true
+            analysis.formParamId = paramId.slice(1)
+            analysis.formDataSource = dsStr
+            analysis.needsGet = true
+            analysis.needsUpdate = true
+          }
+        }
+        if (node.children) walk(node.children)
+      }
+    }
+    walk(components)
+    return analysis
+  }
+
+  /** 从 AppModel 的 dataSources schema 推断字段名列表（供 Detail 等组件渲染） */
+  private inferFields(appModel: AppModel, dataSource: string): string[] {
+    const all = appModel.schema?.dataSources ?? []
+    const ds = all.find((d) => d.id === dataSource || d.id === `database.${dataSource}`)
+    if (!ds) return []
+    // 字段来源：data 数组首元素的 key（DataSource 结构为 { data: [...] }）
+    const rows = Array.isArray(ds.data) ? (ds.data as unknown[]) : []
+    const first = rows[0] as Record<string, unknown> | undefined
+    if (first && typeof first === 'object') {
+      return Object.keys(first)
+    }
+    return []
+  }
+
+  /** 递归判断组件树是否包含任何输入类组件（Input/Textarea/Select） */
+  private hasInputInTree(nodes: ComponentNode[]): boolean {
+    const inputTypes = new Set(['Input', 'Textarea', 'Select'])
+    const walk = (list: ComponentNode[]): boolean => {
+      for (const n of list) {
+        if (inputTypes.has(n.type)) return true
+        if (n.children && walk(n.children)) return true
+      }
+      return false
+    }
+    return walk(nodes)
+  }
+
+  /**
+   * 生成运行时动态表单字段：当 Planner 未在 Form 子树中放置 Input 时，
+   * 兜底在运行时根据已加载数据（customersFallback[0] 或后端第一条记录）的 keys
+   * 动态渲染受控 Input 组件，确保新增/编辑页在预览中始终可填写。
+   *
+   * 由于字段名在运行时才能确定，这里生成一个内嵌的 .map() JSX 表达式，
+   * 遍历字段数组渲染多个 Input 控件。
+   */
+  private generateRuntimeFormFields(
+    dataSource: string,
+    formStateName: string,
+    setFormName: string,
+    pad: string,
+  ): string {
+    // fallback 数据变量名（与 api.ts 中 ${toCamelCase(ds.name)}Fallback 一致）
+    const fallbackName = `${this.toCamelCase(dataSource.replace(/^database\./, ''))}Fallback`
+    // 生成的 JSX：
+    //  1) 优先用后端加载的 ${stateName}[0]?.data 的 keys；
+    //  2) 否则用 ${fallbackName}[0] 的 keys；
+    //  3) 都没有则显示提示
+    return `${pad}  {(() => {\n${pad}    const allKeys = (${fallbackName}[0] ? Object.keys(${fallbackName}[0]) : [])\n${pad}    // 排除系统主键字段（id 等不应作为可编辑字段）\n${pad}    const skip = new Set(['id', '_id', 'createdAt', 'updatedAt', 'created_at', 'updated_at', 'remark', 'remarks', 'note', 'notes'])\n${pad}    const fields = allKeys.filter((k) => !skip.has(k))\n${pad}    if (fields.length === 0) return <div style={{ color: '#999', padding: '12px 0' }}>暂无可编辑字段</div>\n${pad}    return (\n${pad}      <div>\n${pad}        {fields.map((f) => (\n${pad}          <div key={f} style={{ marginBottom: '12px' }}>\n${pad}            <label style={{ display: 'block', marginBottom: '4px', fontSize: '14px' }}>{f}</label>\n${pad}            <input type="text" placeholder={\`请输入\${f}\`} value={${formStateName}[f] ?? ''} onChange={(e) => ${setFormName}({ ...${formStateName}, [f]: e.target.value })} />\n${pad}          </div>\n${pad}        ))}\n${pad}      </div>\n${pad}    )\n${pad}  })()}`
+  }
+
+  /**
+   * 为数据源生成数据加载 Hook。
+   * 生成 useState（数据 + 表单） + useEffect（加载 listRecords）。
+   */
+  private generateDataHook(dataSource: string): string {
+    const stateName = `${this.toCamelCase(dataSource)}Data`
+    const loadName = `load${this.toCamelCase(dataSource).charAt(0).toUpperCase()}${this.toCamelCase(dataSource).slice(1)}`
+    return `  // ─── 数据源：${dataSource} ───
+  const [${stateName}, set${this.capitalize(stateName)}] = useState<Array<{ id: string; data: Record<string, unknown> }>>([])
+  const [${this.toCamelCase(dataSource)}Form, set${this.capitalize(this.toCamelCase(dataSource))}Form] = useState<Record<string, string>>({})
+
+  const ${loadName} = async () => {
+    try {
+      const res = await listRecords('${dataSource}')
+      set${this.capitalize(stateName)}(res.records)
+    } catch (err) {
+      console.error('加载 ${dataSource} 数据失败:', err)
+    }
+  }
+
+  useEffect(() => {
+    void ${loadName}()
+  }, [])`
+  }
+
   // ─── 组件渲染（ComponentNode → JSX） ────────────────────
 
-  private renderComponent(node: ComponentNode, indent: number): string {
+  private renderComponent(node: ComponentNode, indent: number, formDataSource?: string, appModel?: AppModel): string {
     const pad = ' '.repeat(indent)
     const children = node.children || []
-    const childJsx = children.map((c) => this.renderComponent(c, indent + 2)).join('\n')
+    const childJsx = children.map((c) => this.renderComponent(c, indent + 2, formDataSource, appModel)).join('\n')
 
     switch (node.type) {
       case 'Container':
@@ -389,43 +721,126 @@ ${componentJsx}
       case 'Paragraph':
         return `${pad}<p style={{ fontSize: ${this.jsStr(node.props.fontSize)}, lineHeight: ${this.jsStr(node.props.lineHeight)}, color: ${this.jsStr(node.props.color)} }}>${this.escapeHtml(String(node.props.text || ''))}</p>`
 
-      case 'Button':
-        return `${pad}<button className="btn btn-${this.normalizeVariant(node.props.variant)} btn-${this.normalizeSize(node.props.size)}" disabled={${node.props.disabled || false}}>${this.escapeHtml(String(node.props.text || ''))}</button>`
+      case 'Button': {
+        // onClick 支持跳转语义：'/path' 或 'navigate:/path' → 客户端跳转
+        const onClick = node.props.onClick
+        let clickAttr = ''
+        if (typeof onClick === 'string' && onClick.length > 0) {
+          const target = onClick.startsWith('navigate:') ? onClick.slice('navigate:'.length) : onClick
+          if (target.startsWith('/')) {
+            clickAttr = ` onClick={() => { window.location.href = '${this.escapeJsString(target)}' }}`
+          } else {
+            clickAttr = ` onClick={() => { ${this.escapeJsString(onClick)} }}`
+          }
+        }
+        return `${pad}<button${clickAttr} className="btn btn-${this.normalizeVariant(node.props.variant)} btn-${this.normalizeSize(node.props.size)}" disabled={${node.props.disabled || false}}>${this.escapeHtml(String(node.props.text || ''))}</button>`
+      }
 
       case 'Link':
         return `${pad}<a href={${this.jsStr(node.props.href)}} target={${this.jsStr(node.props.target)}}>${this.escapeHtml(String(node.props.text || ''))}</a>`
 
-      case 'Input':
+      case 'Input': {
         const inputLabel = node.props.label
           ? `${pad}  <label style={{ display: 'block', marginBottom: '4px', fontSize: '14px' }}>${this.escapeHtml(String(node.props.label))}</label>\n`
           : ''
+        // 处于表单上下文时，生成受控输入（绑定 form state）
+        if (formDataSource) {
+          const formStateName = `${this.toCamelCase(formDataSource)}Form`
+          const setFormName = `set${this.capitalize(this.toCamelCase(formDataSource))}Form`
+          const fieldKey = this.normalizeFieldKey(String(node.props.field || node.props.name || node.id))
+          return `${pad}<div style={{ marginBottom: '12px' }}>\n${inputLabel}${pad}  <input type=${this.jsStr(node.props.type || 'text')} placeholder=${this.jsStr(node.props.placeholder)} value={${formStateName}['${this.escapeJsString(fieldKey)}'] || ''} onChange={(e) => ${setFormName}({ ...${formStateName}, '${this.escapeJsString(fieldKey)}': e.target.value })} required={${node.props.required || false}} />\n${pad}</div>`
+        }
         return `${pad}<div style={{ marginBottom: '12px' }}>\n${inputLabel}${pad}  <input type=${this.jsStr(node.props.type || 'text')} placeholder=${this.jsStr(node.props.placeholder)} required={${node.props.required || false}} />\n${pad}</div>`
+      }
 
-      case 'Textarea':
+      case 'Textarea': {
         const taLabel = node.props.label
           ? `${pad}  <label style={{ display: 'block', marginBottom: '4px' }}>${this.escapeHtml(String(node.props.label))}</label>\n`
           : ''
+        if (formDataSource) {
+          const formStateName = `${this.toCamelCase(formDataSource)}Form`
+          const setFormName = `set${this.capitalize(this.toCamelCase(formDataSource))}Form`
+          const fieldKey = this.normalizeFieldKey(String(node.props.field || node.props.name || node.id))
+          return `${pad}<div style={{ marginBottom: '12px' }}>\n${taLabel}${pad}  <textarea rows={${node.props.rows || 4}} placeholder=${this.jsStr(node.props.placeholder)} value={${formStateName}['${this.escapeJsString(fieldKey)}'] || ''} onChange={(e) => ${setFormName}({ ...${formStateName}, '${this.escapeJsString(fieldKey)}': e.target.value })} />\n${pad}</div>`
+        }
         return `${pad}<div style={{ marginBottom: '12px' }}>\n${taLabel}${pad}  <textarea rows={${node.props.rows || 4}} placeholder=${this.jsStr(node.props.placeholder)} />\n${pad}</div>`
+      }
 
-      case 'Select':
+      case 'Select': {
         const selLabel = node.props.label
           ? `${pad}  <label style={{ display: 'block', marginBottom: '4px' }}>${this.escapeHtml(String(node.props.label))}</label>\n`
           : ''
+        // options 兼容两种格式：字符串数组 ['活跃'] 或 对象数组 [{label:'活跃', value:'active'}]
         const options = Array.isArray(node.props.options)
-          ? (node.props.options as string[])
-              .map((opt) => `${pad}    <option value="${this.escapeHtml(opt)}">${this.escapeHtml(opt)}</option>`)
+          ? (node.props.options as Array<unknown>)
+              .map((opt) => {
+                if (opt && typeof opt === 'object') {
+                  const o = opt as Record<string, unknown>
+                  const label = String(o.label ?? o.text ?? o.title ?? '')
+                  const value = String(o.value ?? label)
+                  return `${pad}    <option value="${this.escapeHtml(value)}">${this.escapeHtml(label)}</option>`
+                }
+                const s = String(opt)
+                return `${pad}    <option value="${this.escapeHtml(s)}">${this.escapeHtml(s)}</option>`
+              })
               .join('\n')
           : ''
+        if (formDataSource) {
+          const formStateName = `${this.toCamelCase(formDataSource)}Form`
+          const setFormName = `set${this.capitalize(this.toCamelCase(formDataSource))}Form`
+          const fieldKey = this.normalizeFieldKey(String(node.props.field || node.props.name || node.id))
+          return `${pad}<div style={{ marginBottom: '12px' }}>\n${selLabel}${pad}  <select value={${formStateName}['${this.escapeJsString(fieldKey)}'] || ''} onChange={(e) => ${setFormName}({ ...${formStateName}, '${this.escapeJsString(fieldKey)}': e.target.value })}>\n${pad}    <option value="">请选择</option>\n${options}\n${pad}  </select>\n${pad}</div>`
+        }
         return `${pad}<div style={{ marginBottom: '12px' }}>\n${selLabel}${pad}  <select>\n${options}\n${pad}  </select>\n${pad}</div>`
+      }
 
       case 'Checkbox':
         return `${pad}<label style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>\n${pad}  <input type="checkbox" defaultChecked={${node.props.checked || false}} />\n${pad}  <span>${this.escapeHtml(String(node.props.label || ''))}</span>\n${pad}</label>`
 
-      case 'Form':
+      case 'Form': {
         const formTitle = node.props.title
           ? `${pad}  <h3 style={{ marginBottom: '16px' }}>${this.escapeHtml(String(node.props.title))}</h3>\n`
           : ''
+        const dataSource = node.props.dataSource
+        const paramId = node.props.paramId
+        const isEdit = typeof paramId === 'string' && paramId.startsWith(':')
+
+        // 有 dataSource 时，提交调用 createRecord（新增）或 updateRecord（编辑）；子组件绑定到 form state
+        if (dataSource && typeof dataSource === 'string') {
+          const formStateName = `${this.toCamelCase(dataSource)}Form`
+          const setFormName = `set${this.capitalize(this.toCamelCase(dataSource))}Form`
+          const loadName = `load${this.capitalize(this.toCamelCase(dataSource))}`
+          // 子组件绑定到 form state；但若 Form 子树中没有任何输入组件
+          // （Planner 未生成 Input / 生成了空 Section），则根据数据源字段自动
+          // 生成受控输入，确保新增/编辑表单在预览中可用
+          const hasInputs = children.length > 0 && this.hasInputInTree(children)
+          // Form 兜底：Planner 可能没生成 Input 组件（children 为空或只有 Header/Section）。
+          // 此时用运行时动态生成——从数据源加载后的第一条记录取字段名，渲染受控输入。
+          // 这样无论 Planner 生成什么结构的 Form 树，新增/编辑都能填写并保存。
+          const formChildJsx = hasInputs
+            ? children.map((c) => this.renderComponent(c, indent + 2, dataSource, appModel)).join('\n')
+            : this.generateRuntimeFormFields(dataSource, formStateName, setFormName, pad)
+          // 编辑模式：提交时携带 :id 调用 updateRecord
+          const submitBody = isEdit
+            ? `${pad}      await updateRecord('${dataSource}', props.id ?? '', ${formStateName})`
+            : `${pad}      await createRecord('${dataSource}', ${formStateName})`
+          const afterSubmit = isEdit
+            ? `${pad}      window.alert('保存成功')`
+            : `${pad}      ${setFormName}({})\n${pad}      await ${loadName}()`
+          return `${pad}<form onSubmit={async (e) => {
+${pad}    e.preventDefault()
+${pad}    try {
+${submitBody}
+${afterSubmit}
+${pad}    } catch (err) {
+${pad}      console.error('提交失败:', err)
+${pad}      alert('提交失败，请重试')
+${pad}    }
+${pad}  }} style={{ display: ${this.jsStr(node.props.layout === 'horizontal' ? 'flex' : 'block')}, gap: '12px' }}>\n${formTitle}${formChildJsx}\n${pad}  <button type="submit" className="btn btn-primary btn-medium">${this.escapeHtml(String(node.props.submitText || '提交'))}</button>\n${pad}</form>`
+        }
+
         return `${pad}<form onSubmit={(e) => e.preventDefault()} style={{ display: ${this.jsStr(node.props.layout === 'horizontal' ? 'flex' : 'block')}, gap: '12px' }}>\n${formTitle}${childJsx}\n${pad}  <button type="submit" className="btn btn-primary btn-medium">${this.escapeHtml(String(node.props.submitText || '提交'))}</button>\n${pad}</form>`
+      }
 
       case 'Image':
         return `${pad}<img src=${this.jsStr(node.props.src)} alt=${this.jsStr(node.props.alt)} style={{ width: ${this.jsStr(node.props.width)}, height: ${this.jsStr(node.props.height)}, borderRadius: ${this.jsStr(node.props.radius)}, objectFit: 'cover' }} />`
@@ -456,14 +871,132 @@ ${componentJsx}
         return `${pad}<div style={{ display: 'flex', flexDirection: 'column', gap: ${this.jsStr(node.props.gap)} }}>\n${body}\n${pad}</div>`
       }
 
-      case 'Table': {
-        const columns = Array.isArray(node.props.columns)
-          ? (node.props.columns as Array<{ key: string; title: string }>)
+      case 'Detail': {
+        // 详情组件：从页面级 record state（已由路由参数 :id 加载）渲染字段。
+        // 字段来源优先级：
+        //   1) 组件声明的 fields（兼容字符串[] 或 {key,label}[]）
+        //   2) 数据源推断字段
+        //   3) 运行时直接遍历 record.data 的所有 key（最稳健兜底）
+        const dataSource = node.props.dataSource
+        const dsBase = typeof dataSource === 'string' ? dataSource.replace(/^database\./, '') : ''
+        const rawFields = Array.isArray(node.props.fields) ? (node.props.fields as Array<unknown>) : []
+        const declaredFields: Array<{ key: string; label: string }> = rawFields.length
+          ? rawFields.map((f) => {
+              if (typeof f === 'string') return { key: f, label: f }
+              const o = (f as Record<string, unknown>) || {}
+              const k = String(o.key ?? o.name ?? o.field ?? '')
+              return { key: k, label: String(o.label ?? o.title ?? k) }
+            }).filter((f) => f.key)
           : []
-        const headJsx =
-          columns.length > 0
-            ? `${pad}  <thead>\n${pad}    <tr>\n${columns.map((col) => `${pad}      <th>${this.escapeHtml(col.title || col.key)}</th>`).join('\n')}\n${pad}    </tr>\n${pad}  </thead>\n`
+        const fieldList = declaredFields.length
+          ? declaredFields
+          : dataSource
+            ? this.inferFields(appModel, dataSource).map((k) => ({ key: k, label: k }))
+            : []
+
+        // 优先用声明的/推断的字段；若为空，则运行时遍历 record.data 渲染
+        const declaredRows = fieldList
+          .map(
+            (f) =>
+              `${pad}  <div style={{ display: 'flex', gap: '12px', padding: '10px 0', borderBottom: '1px solid #f0f0f0' }}>\n${pad}    <span style={{ width: '120px', color: '#888' }}>${this.escapeHtml(f.label)}</span>\n${pad}    <span>{String(record?.data?.['${this.escapeJsString(f.key)}'] ?? '')}</span>\n${pad}  </div>`,
+          )
+          .join('\n')
+
+        // 兜底：当 record 已加载但声明字段为空时，遍历 record.data 所有 key
+        const dynamicRows = `${pad}  {record ? (\n${pad}    Object.keys(record.data).map((k) => (\n${pad}      <div key={k} style={{ display: 'flex', gap: '12px', padding: '10px 0', borderBottom: '1px solid #f0f0f0' }}>\n${pad}        <span style={{ width: '120px', color: '#888' }}>{k}</span>\n${pad}        <span>{String(record.data[k] ?? '')}</span>\n${pad}      </div>\n${pad}    ))\n${pad}  ) : (\n${pad}    <div style={{ color: '#999', padding: '16px 0' }}>加载中...</div>\n${pad}  )}`
+
+        const rowsJsx = fieldList.length > 0 ? declaredRows : dynamicRows
+        const title = node.props.title
+          ? `${pad}<h2 style={{ marginBottom: '16px' }}>${this.escapeHtml(String(node.props.title))}</h2>\n`
+          : ''
+        const backBtn = dataSource
+          ? `${pad}<a className="btn btn-default btn-medium" href="/${dsBase}" style={{ marginBottom: '16px', display: 'inline-block' }}>返回列表</a>\n`
+          : ''
+        return `${title}${backBtn}<div className="detail-card" style={{ background: 'white', padding: '20px', borderRadius: '8px' }}>\n${rowsJsx}\n${pad}</div>`
+      }
+
+      case 'Table': {
+        // columns：优先用组件声明的列；若缺失或 key 为空，则从数据源 schema 推断字段补全
+        const rawColumns = Array.isArray(node.props.columns)
+          ? (node.props.columns as Array<{ key?: string; title?: string }>)
+          : []
+        const dsId = node.props.dataSource
+        const inferredFields = dsId && typeof dsId === 'string' ? this.inferFields(appModel, dsId) : []
+        let columns: Array<{ key: string; title: string }>
+        if (rawColumns.length > 0 && rawColumns.some((c) => c.key && c.key.length > 0)) {
+          columns = rawColumns
+            .filter((c) => c.key && c.key.length > 0)
+            .map((c) => ({ key: String(c.key), title: String(c.title || c.key) }))
+        } else if (inferredFields.length > 0) {
+          columns = inferredFields.map((f) => ({ key: f, title: f }))
+        } else {
+          columns = []
+        }
+        // 当没有可用的列定义时，采用运行时动态列：从第一条记录取字段渲染，避免列表空表头
+        const dynamicCols = columns.length === 0
+
+        // 有 dataSource 时，从后端加载的数据渲染；否则用静态 rows
+        const dataSource = node.props.dataSource
+        if (dataSource && typeof dataSource === 'string') {
+          // 路由链接使用数据源 short name（去掉 database. 前缀），与 App 路由 /<name>/* 保持一致
+          const dsBase = dataSource.replace(/^database\./, '')
+          const stateName = `${this.toCamelCase(dataSource)}Data`
+          const searchable = node.props.searchable !== false
+          // 搜索时优先使用页面级过滤状态（*DataFiltered），否则用原数据
+          const dataExpr = searchable ? `(${stateName}Filtered ?? ${stateName})` : stateName
+
+          // actions 操作列（详情 / 编辑 / 删除）
+          const actions = Array.isArray(node.props.actions)
+            ? (node.props.actions as string[])
+            : []
+          const hasActions = actions.length > 0
+          const actionHead = hasActions ? `<th>操作</th>` : ''
+          const actionCells =
+            hasActions
+              ? `\n${pad}          <td style={{ display: 'flex', gap: '8px' }}>\n${
+                  actions
+                    .map((act) => {
+                      const label =
+                        act === 'detail' ? '详情' : act === 'edit' ? '编辑' : act === 'delete' ? '删除' : act
+                      if (act === 'delete') {
+                        // handleDelete 使用完整 dataSource id（与 api.ts 的 TABLES key 一致）
+                        return `${pad}            <button className="btn btn-danger btn-small" onClick={() => handleDelete('${dataSource}', rec.id)}>${label}</button>`
+                      }
+                      // 链接使用 short name 前缀，与 App 路由 /<name>/* 匹配。
+                      // 必须用 JSX 模板表达式包裹（href={`...`}），否则 ${rec.id} 会变成字面量。
+                      const hrefTpl =
+                        act === 'detail'
+                          ? `/${dsBase}/\${rec.id}`
+                          : `/${dsBase}/\${rec.id}/edit`
+                      return `${pad}            <a className="btn btn-default btn-small" href={\`${hrefTpl}\`}>${label}</a>`
+                    })
+                    .join('\n')
+                }\n${pad}          </td>`
+              : ''
+
+          // 表头：动态列或静态列；操作列（若有）放入同一 <tr>，避免 DOM 嵌套错误
+          const dynamicHead =
+            dynamicCols
+              ? `${pad}  <thead>\n${pad}    <tr>\n${pad}      {(${stateName}[0] ? Object.keys(${stateName}[0].data) : []).map((k) => (\n${pad}        <th key={k}>{k}</th>\n${pad}      ))}${actionHead ? `\n${pad}      ${actionHead}` : ''}\n${pad}    </tr>\n${pad}  </thead>\n`
+              : `${pad}  <thead>\n${pad}    <tr>\n${columns.map((col) => `${pad}      <th>${this.escapeHtml(col.title || col.key)}</th>`).join('\n')}${actionHead ? `\n${pad}      ${actionHead}` : ''}\n${pad}    </tr>\n${pad}  </thead>\n`
+          const headJsx = columns.length > 0 || dynamicCols ? dynamicHead : ''
+
+          // 行渲染：动态列时遍历 rec.data 所有 key，否则按 columns 渲染
+          const rowCells = dynamicCols
+            ? `${pad}          {Object.keys(rec.data).map((k) => (\n${pad}            <td key={k}>{String(rec.data[k] ?? '')}</td>\n${pad}          ))}`
+            : columns
+                .map((col) => `${pad}          <td>{String(rec.data['${this.escapeJsString(col.key)}'] ?? '')}</td>`)
+                .join('\n')
+          const bodyJsx = `${pad}  <tbody>\n${pad}    {${dataExpr}.length > 0 ? (\n${pad}      ${dataExpr}.map((rec) => (\n${pad}        <tr key={rec.id}>\n${rowCells}${actionCells}\n${pad}        </tr>\n${pad}      ))\n${pad}    ) : (\n${pad}      <tr>\n${pad}        <td colSpan={${columns.length + (hasActions ? 1 : 0) || 1}} style={{ padding: '24px', textAlign: 'center', color: '#999999' }}>暂无数据</td>\n${pad}      </tr>\n${pad}    )}\n${pad}  </tbody>\n`
+
+          // 搜索框 + 新增按钮（CRUD 工具栏）；链接使用 short name 前缀
+          const toolbar = searchable
+            ? `${pad}<div style={{ display: 'flex', gap: '12px', marginBottom: '16px', alignItems: 'center' }}>\n${pad}  <input className="form-input" placeholder="搜索..." value={q} onChange={(e) => setQ(e.target.value)} style={{ flex: 1 }} />\n${pad}  <a className="btn btn-primary btn-medium" href="/${dsBase}/new">新增</a>\n${pad}</div>`
             : ''
+
+          return `${toolbar}${pad}<table>\n${headJsx}${bodyJsx}${pad}</table>`
+        }
+
         const rows = Array.isArray(node.props.rows) ? (node.props.rows as Array<Record<string, unknown>>) : []
         const bodyJsx =
           rows.length > 0
@@ -516,18 +1049,157 @@ ${componentJsx}
     }
   }
 
-  // ─── 数据源文件生成 ─────────────────────────────────────
+  // ─── 数据访问层生成 ─────────────────────────────────────
 
-  private generateDataFile(appModel: AppModel): GeneratedFile {
+  /**
+   * 生成前端数据访问层（src/api.ts）。
+   * 基于 AI快搭 统一 Data API（/api/data），提供类型安全的 CRUD 方法。
+   * 让 AI 生成的应用拥有真实的后端数据存取能力，而非仅前端 Mock。
+   */
+  private generateDataFile(appModel: AppModel, appId?: string): GeneratedFile {
     const dataSources = appModel.schema.dataSources
-    const exports = dataSources
-      .map((ds) => `export const ${ds.name} = ${JSON.stringify(ds.data, null, 2)};`)
+    const tableEntries = dataSources
+      .map((ds) => {
+        // tableId 必须与后端 backend-init.service 建表的主键完全一致：
+        // 后端使用 `${appId}:${dataSource.name}` 作为 data_models.id，
+        // 因此前端请求也须使用相同的 tableId 才能命中后端表。
+        // 若没有 appId（如单测直接调用 Builder），则退回使用 dataSource.name，
+        // 此时后端 resolveTable 按 name 也能定位（见 routes/data.ts）。
+        const tableId = appId ? `${appId}:${ds.name}` : ds.id || ds.name
+        // 同时注册多个别名 key（ds.id / ds.name / database.<name>），
+        // 以兼容 Builder 生成页面时的不同调用参数（如 'customers' 或 'database.customers'）。
+        const keys = new Set<string>()
+        if (ds.id) keys.add(ds.id)
+        if (ds.name) keys.add(ds.name)
+        if (ds.name) keys.add(`database.${ds.name}`)
+        return Array.from(keys)
+          .map((k) => `  ${JSON.stringify(k)}: { tableId: '${tableId}' },`)
+          .join('\n')
+      })
+      .join('\n')
+
+    const staticExports = dataSources
+      .map((ds) => {
+        // fallback 变量名以 ds.id 为准（去除 database. 前缀后转 camelCase），
+        // 与 generateRuntimeFormFields 中 fallbackName 计算保持一致，
+        // 避免 LLM 给的中文 name（如"客户表"）导致变量名不匹配。
+        const idBase = (ds.id || ds.name || '').replace(/^database\./, '')
+        return `export const ${this.toCamelCase(idBase)}Fallback = ${JSON.stringify(ds.data, null, 2)};`
+      })
       .join('\n\n')
 
     return {
-      path: 'src/data.ts',
-      content: `// 自动生成的数据源文件\n// 由 AI快搭 Builder Agent 生成\n\n${exports}\n`,
+      path: 'src/api.ts',
+      content: `// 自动生成的数据访问层
+// 由 AI快搭 Builder Agent 生成
+// 基于统一 Data API（/api/data），提供真实的后端数据存取能力。
+
+export interface TableRef {
+  tableId: string
+}
+
+// 数据表引用（tableId 对应后端 data_models 表）
+export const TABLES: Record<string, TableRef> = {
+${tableEntries || '  // 无数据表'}
+}
+
+// ─── 通用 CRUD 方法 ─────────────────────────────────────
+
+async function request<T>(url: string, options?: RequestInit): Promise<T> {
+  const res = await fetch(url, {
+    headers: { 'Content-Type': 'application/json' },
+    ...options,
+  })
+  if (!res.ok) {
+    const body = await res.text().catch(() => '')
+    throw new Error(\`API 请求失败 (\${res.status}): \${body}\`)
+  }
+  return res.json() as Promise<T>
+}
+
+/** 查询记录（支持 search / filter / sort / pagination） */
+export async function listRecords(tableName: string, query: Record<string, unknown> = {}) {
+  const table = TABLES[tableName]
+  if (!table) throw new Error(\`未知数据表: \${tableName}\`)
+  const params = new URLSearchParams()
+  for (const [key, value] of Object.entries(query)) {
+    params.set(key, typeof value === 'string' ? value : JSON.stringify(value))
+  }
+  const qs = params.toString()
+  return request<{ records: Array<{ id: string; data: Record<string, unknown> }>; total: number }>(
+    \`/api/data/tables/\${table.tableId}/records\${qs ? \`?\${qs}\` : ''}\`,
+  )
+}
+
+/** 创建记录 */
+export async function createRecord(tableName: string, data: Record<string, unknown>) {
+  const table = TABLES[tableName]
+  if (!table) throw new Error(\`未知数据表: \${tableName}\`)
+  return request<{ record: { id: string; data: Record<string, unknown> } }>(
+    \`/api/data/tables/\${table.tableId}/records\`,
+    { method: 'POST', body: JSON.stringify({ data }) },
+  )
+}
+
+/** 更新记录 */
+export async function updateRecord(tableName: string, id: string, data: Record<string, unknown>) {
+  return request<{ record: { id: string; data: Record<string, unknown> } }>(
+    \`/api/data/records/\${id}\`,
+    { method: 'PATCH', body: JSON.stringify({ data }) },
+  )
+}
+
+/** 删除记录 */
+export async function deleteRecord(tableName: string, id: string) {
+  return request<{ success: boolean }>(\`/api/data/records/\${id}\`, { method: 'DELETE' })
+}
+
+/** 查询单条记录（按 recordId） */
+export async function getRecord(tableName: string, id: string) {
+  return request<{ record: { id: string; data: Record<string, unknown> } | null }>(\`/api/data/records/\${id}\`)
+}
+
+// ─── 静态数据 Fallback（后端不可用时） ───────────────────
+
+${staticExports}
+`,
     }
+  }
+
+  /** 将 snake_case / 空格 / 点号 转为 camelCase（点号常见于 dataSource id 如 'database.customers'） */
+  private toCamelCase(name: string): string {
+    return name
+      .split(/[\s_\-\.]+/)
+      .filter((p) => p.length > 0)
+      .map((part, i) => (i === 0 ? part.toLowerCase() : part.charAt(0).toUpperCase() + part.slice(1).toLowerCase()))
+      .join('')
+  }
+
+  /**
+   * 规范化表单字段 key：去除 LLM 常加的 input_/select_/textarea_/field_ 前缀，
+   * 使提交的数据字段名（name/phone/...）与后端数据表字段一致。
+   */
+  private normalizeFieldKey(raw: string): string {
+    if (!raw) return raw
+    // 反复去掉各种可能的输入组件前缀（new_input_/edit_select_/input_/field_...），直到稳定。
+    // 注意：不要把单词开头的普通字符误判为前缀（如 "company" 的 "c"），所以
+    // 通用单词（input/select/...）需要下划线/连字符边界；动词前缀用下划线边界。
+    let cur = raw
+    for (let i = 0; i < 3; i++) {
+      const next = cur.replace(
+        /^(new|edit|view|add|create|update)_|(?:^|_)input_|(?:^|_)select_|(?:^|_)textarea_|(?:^|_)field_|(?:^|_)form_|(?:^|_)control_|(?:^|_)ctrl_|(?:^|_)cmp_/i,
+        '',
+      )
+      if (next === cur) break
+      cur = next
+    }
+    return cur
+  }
+
+  /** 首字母大写 */
+  private capitalize(name: string): string {
+    if (!name) return name
+    return name.charAt(0).toUpperCase() + name.slice(1)
   }
 
   // ─── 辅助方法 ───────────────────────────────────────────

@@ -6,6 +6,9 @@ export default defineConfig({
     environment: 'node',
     include: ['src/**/__tests__/**/*.test.ts'],
     globals: false,
+    setupFiles: ['./src/test-setup.ts'],
+    // 串行执行测试文件，避免多个文件争用同一个 SQLite 单例
+    fileParallelism: false,
   },
   resolve: {
     alias: {

@@ -1,6 +1,16 @@
 import { eq, and, isNull, desc, sql } from 'drizzle-orm'
 import { drizzleDb } from './client'
-import { users, localCredentials, tasks, settings, deployments, appModels, appVersions } from '../schema'
+import {
+  users,
+  localCredentials,
+  tasks,
+  settings,
+  deployments,
+  appModels,
+  appVersions,
+  dataModels,
+  dataRecords,
+} from '../schema'
 import type {
   User,
   NewUser,
@@ -16,6 +26,10 @@ import type {
   NewAppModelRecord,
   AppVersionRecord,
   NewAppVersionRecord,
+  DataModelRecord,
+  NewDataModelRecord,
+  DataRecordRow,
+  NewDataRecordRow,
   UserRepository,
   LocalCredentialRepository,
   TaskRepository,
@@ -23,6 +37,8 @@ import type {
   DeploymentRepository,
   AppModelRepository,
   AppVersionRepository,
+  DataModelRepository,
+  DataRecordRepository,
   DatabaseProvider,
 } from '../types'
 
@@ -384,6 +400,102 @@ class DrizzleAppVersionRepository implements AppVersionRepository {
   }
 }
 
+// ─── Data Model Repository ──────────────────────────────────────────────────
+
+class DrizzleDataModelRepository implements DataModelRepository {
+  async findById(id: string): Promise<DataModelRecord | null> {
+    const [row] = await drizzleDb.select().from(dataModels).where(eq(dataModels.id, id)).limit(1)
+    return (row as DataModelRecord) ?? null
+  }
+
+  async findByAppId(appId: string): Promise<DataModelRecord[]> {
+    return drizzleDb
+      .select()
+      .from(dataModels)
+      .where(eq(dataModels.appId, appId))
+      .orderBy(desc(dataModels.createdAt)) as Promise<DataModelRecord[]>
+  }
+
+  async findByAppIdAndName(appId: string, name: string): Promise<DataModelRecord | null> {
+    const [row] = await drizzleDb
+      .select()
+      .from(dataModels)
+      .where(and(eq(dataModels.appId, appId), eq(dataModels.name, name)))
+      .limit(1)
+    return (row as DataModelRecord) ?? null
+  }
+
+  async create(record: NewDataModelRecord): Promise<DataModelRecord> {
+    const ts = now()
+    const values = {
+      ...record,
+      createdAt: record.createdAt ?? ts,
+      updatedAt: record.updatedAt ?? ts,
+    }
+    await drizzleDb.insert(dataModels).values(values)
+    return values as DataModelRecord
+  }
+
+  async update(id: string, data: Partial<Omit<DataModelRecord, 'id'>>): Promise<DataModelRecord | null> {
+    const ts = now()
+    await drizzleDb
+      .update(dataModels)
+      .set({ ...data, updatedAt: ts })
+      .where(eq(dataModels.id, id))
+    return this.findById(id)
+  }
+
+  async deleteById(id: string): Promise<void> {
+    await drizzleDb.delete(dataModels).where(eq(dataModels.id, id))
+  }
+}
+
+// ─── Data Record Repository ────────────────────────────────────────────────
+
+class DrizzleDataRecordRepository implements DataRecordRepository {
+  async findById(id: string): Promise<DataRecordRow | null> {
+    const [row] = await drizzleDb.select().from(dataRecords).where(eq(dataRecords.id, id)).limit(1)
+    return (row as DataRecordRow) ?? null
+  }
+
+  async findByTableId(tableId: string): Promise<DataRecordRow[]> {
+    return drizzleDb
+      .select()
+      .from(dataRecords)
+      .where(eq(dataRecords.tableId, tableId))
+      .orderBy(desc(dataRecords.createdAt)) as Promise<DataRecordRow[]>
+  }
+
+  async create(record: NewDataRecordRow): Promise<DataRecordRow> {
+    const ts = now()
+    const values = {
+      ...record,
+      createdAt: record.createdAt ?? ts,
+      updatedAt: record.updatedAt ?? ts,
+    }
+    await drizzleDb.insert(dataRecords).values(values)
+    return values as DataRecordRow
+  }
+
+  async update(id: string, dataJson: string): Promise<DataRecordRow | null> {
+    const ts = now()
+    await drizzleDb.update(dataRecords).set({ dataJson, updatedAt: ts }).where(eq(dataRecords.id, id))
+    return this.findById(id)
+  }
+
+  async deleteById(id: string): Promise<void> {
+    await drizzleDb.delete(dataRecords).where(eq(dataRecords.id, id))
+  }
+
+  async countByTableId(tableId: string): Promise<number> {
+    const [result] = await drizzleDb
+      .select({ count: sql<number>`count(*)` })
+      .from(dataRecords)
+      .where(eq(dataRecords.tableId, tableId))
+    return result?.count ?? 0
+  }
+}
+
 // ─── Provider Factory ───────────────────────────────────────────────────────
 
 export function createDrizzleProvider(): DatabaseProvider {
@@ -395,5 +507,7 @@ export function createDrizzleProvider(): DatabaseProvider {
     deployments: new DrizzleDeploymentRepository(),
     appModels: new DrizzleAppModelRepository(),
     appVersions: new DrizzleAppVersionRepository(),
+    dataModels: new DrizzleDataModelRepository(),
+    dataRecords: new DrizzleDataRecordRepository(),
   }
 }

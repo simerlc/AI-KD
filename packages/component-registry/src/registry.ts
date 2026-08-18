@@ -3,7 +3,7 @@ import { Container, Grid, Flex, Section } from './components/layout'
 import { Heading, Text, Paragraph } from './components/text'
 import { Button, Link } from './components/button'
 import { Input, Textarea, Select, Checkbox, Form } from './components/form'
-import { Image, Card, List, Table } from './components/display'
+import { Image, Card, List, Table, Detail } from './components/display'
 import { Header, Footer, NavBar, Tabs } from './components/navigation'
 import { Alert, Badge, Modal } from './components/feedback'
 
@@ -33,6 +33,7 @@ const builtinComponents: ComponentDefinition[] = [
   Card,
   List,
   Table,
+  Detail,
   // navigation
   Header,
   Footer,

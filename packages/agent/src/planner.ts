@@ -268,7 +268,7 @@ export class PlannerAgent {
   private buildMessages(
     prompt: string,
     appType: AppType,
-    appName: string,
+    appName: string | undefined,
     errorFeedback: string,
     existing?: AppModel,
     history?: PlannerOptions['history'],
@@ -308,7 +308,7 @@ export class PlannerAgent {
    *
    * 注入时会对组件 id 加页面前缀，避免多页面组件 id 冲突。
    */
-  private ensurePageContent(model: AppModel, appType: AppType, appName: string): AppModel {
+  private ensurePageContent(model: AppModel, appType: AppType, appName: string | undefined): AppModel {
     const pages = model.schema.pages
     if (pages.length === 0) return model
     const allHaveContent = pages.every((p) => (p.components?.length ?? 0) > 0)
@@ -317,7 +317,7 @@ export class PlannerAgent {
       return model
     }
 
-    const starter = createStarterAppModel(appType, appName)
+    const starter = createStarterAppModel(appType, appName ?? '未命名应用')
     const starterHome = starter.schema.pages.find((p) => p.path === '/')
     const starterComponents = starterHome?.components ?? []
 
@@ -444,7 +444,7 @@ export class PlannerAgent {
   private buildUserPrompt(
     prompt: string,
     appType: AppType,
-    appName: string,
+    appName: string | undefined,
     errorFeedback: string,
     existing?: AppModel,
   ): string {
@@ -479,14 +479,27 @@ ${errorFeedback}
 
     let content = `## 应用信息
 
-- 应用名称：${appName}
-- 应用类型：${appType}
+- 应用名称：${appName ?? '未命名应用'}
+- 应用形态：具有前后端、可预览、可立即使用的轻应用（统一形态，不再区分 Web/H5/Static）。
+  请把应用视为一个**完整可运行的小型 Web 应用**，而不是单页 HTML 或纯静态落地页：
+  - 前端：React 页面 + 必要的交互组件
+  - 后端：可由 Builder 自动生成的 \`src/api.ts\`（CRUD over \`/api/data\`，由 \`backend-init.service\` 自动建表与写入）
+  - 数据：使用 \`dataSources\` 描述持久化数据；运行时通过 \`api.ts\` 真实读写
+  - 预览：生成完整代码后即可在预览中直接看到数据列表、提交表单等效果
 
-## 用户需求
+## 用户需求（一句话）
 
 ${prompt}
 
-请根据以上需求生成 App Model JSON。`
+请根据以上需求直接生成完整的 App Model JSON。请确保：
+1) 在 \`dataSources\` 中声明所有需要持久化的数据表（含样例数据，Builder 会写入数据库并由前端通过 \`api.ts\` 真实加载）；
+2) 在 \`schema.pages\` 中提供对应页面，且每个页面必须有具体的 \`components\`（不要留空）；
+3) 用「组件 props」表达交互（Builder 只读取组件树 props，不支持 events/actions）：
+   - 列表页 Table：设置 \`dataSource: "database.<表名>"\`、\`searchable: true\`（出现搜索框+新增按钮）、\`actions: ["detail","edit","delete"]\`（自动生成详情/编辑/删除按钮，删除会真实调用删除接口）；
+   - 列表页用 \`<Button onClick="/<表名>/new">新增</Button>\` 也可表达新增；
+   - 详情页 \`<Detail dataSource="database.<表名>" paramId=":id" />\`、编辑页 \`<Form dataSource="database.<表名>" paramId=":id" />\`、新增页 \`<Form dataSource="database.<表名>" />\`；
+   - 链接用 \`<Link href="/<表名>">\` 或 \`<Link href={"/<表名>/" + row.id}>详情</Link>\`。
+   不要依赖 events/actions 字段，Builder 不会渲染它们。`
 
     if (errorFeedback) {
       content += `

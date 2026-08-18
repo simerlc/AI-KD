@@ -25,7 +25,6 @@ export function HomePageContent({ maxSandboxDuration = 300 }: { maxSandboxDurati
 
   const handleTaskSubmit = async (data: {
     prompt: string
-    appType: string
     selectedModel: string
     mode: 'default' | 'coding'
     installDependencies: boolean
@@ -43,13 +42,14 @@ export function HomePageContent({ maxSandboxDuration = 300 }: { maxSandboxDurati
     const { id } = addTaskOptimistically(data)
 
     try {
-      // 先创建 task（不再与 ACP 初始化强绑定）
+      // 先创建 task（不再与 ACP 初始化强绑定）。
+      // 应用类型已统一为 "轻应用"，统一传 'web' 作为后端存储标识。
       const taskRes = await fetch('/api/tasks', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           prompt: data.prompt,
-          appType: data.appType,
+          appType: 'web',
           selectedModel: data.selectedModel,
           title: data.prompt.slice(0, 50),
           id,

@@ -90,6 +90,26 @@ export interface AppVersionRecord {
   createdAt: number
 }
 
+// ─── Data Model / Data Record Types ─────────────────────────────────────────
+
+export interface DataModelRecord {
+  id: string
+  appId: string
+  name: string
+  fieldsJson: string // TableField[] JSON 字符串
+  createdAt: number
+  updatedAt: number
+}
+
+export interface DataRecordRow {
+  id: string
+  appId: string
+  tableId: string
+  dataJson: string // 记录 JSON 对象字符串
+  createdAt: number
+  updatedAt: number
+}
+
 // ─── Creation Types ─────────────────────────────────────────────────────────
 
 type UserNullableFields = 'email' | 'name' | 'avatarUrl' | 'apiKey'
@@ -145,6 +165,16 @@ export type NewAppModelRecord = Omit<AppModelRecord, 'createdAt' | 'updatedAt'> 
 
 export type NewAppVersionRecord = Omit<AppVersionRecord, 'createdAt'> & {
   createdAt?: number
+}
+
+export type NewDataModelRecord = Omit<DataModelRecord, 'createdAt' | 'updatedAt'> & {
+  createdAt?: number
+  updatedAt?: number
+}
+
+export type NewDataRecordRow = Omit<DataRecordRow, 'createdAt' | 'updatedAt'> & {
+  createdAt?: number
+  updatedAt?: number
 }
 
 // ─── Repository Interfaces ──────────────────────────────────────────────────
@@ -210,6 +240,24 @@ export interface AppVersionRepository {
   deleteById(id: string): Promise<void>
 }
 
+export interface DataModelRepository {
+  findById(id: string): Promise<DataModelRecord | null>
+  findByAppId(appId: string): Promise<DataModelRecord[]>
+  findByAppIdAndName(appId: string, name: string): Promise<DataModelRecord | null>
+  create(record: NewDataModelRecord): Promise<DataModelRecord>
+  update(id: string, data: Partial<Omit<DataModelRecord, 'id'>>): Promise<DataModelRecord | null>
+  deleteById(id: string): Promise<void>
+}
+
+export interface DataRecordRepository {
+  findById(id: string): Promise<DataRecordRow | null>
+  findByTableId(tableId: string): Promise<DataRecordRow[]>
+  create(record: NewDataRecordRow): Promise<DataRecordRow>
+  update(id: string, dataJson: string): Promise<DataRecordRow | null>
+  deleteById(id: string): Promise<void>
+  countByTableId(tableId: string): Promise<number>
+}
+
 // ─── Database Provider ──────────────────────────────────────────────────────
 
 export interface DatabaseProvider {
@@ -220,4 +268,6 @@ export interface DatabaseProvider {
   deployments: DeploymentRepository
   appModels: AppModelRepository
   appVersions: AppVersionRepository
+  dataModels: DataModelRepository
+  dataRecords: DataRecordRepository
 }

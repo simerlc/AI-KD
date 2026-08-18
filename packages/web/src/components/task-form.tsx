@@ -14,7 +14,6 @@ import type { ModelInfo } from '@aikd/shared'
 interface TaskFormProps {
   onSubmit: (data: {
     prompt: string
-    appType: string
     selectedModel: string
     mode: 'default' | 'coding'
     installDependencies: boolean
@@ -31,6 +30,10 @@ interface TaskFormProps {
   maxSandboxDuration?: number
 }
 
+// 应用类型已统一：移除 Web/H5/Static 选项，统一生成具有前后端、可预览、可使用的轻应用
+// 此处保持为常量名，便于后续扩展回多类型时一处修改即可。
+const APP_TYPE = 'web'
+
 const SELECTED_AGENT = 'aikd'
 
 export function TaskForm({
@@ -45,7 +48,8 @@ export function TaskForm({
   const userId = session?.user?.id || ''
   const [prompt, setPrompt] = useAtom(taskPromptAtom)
   const [selectedModel, setSelectedModel] = useState<string>('glm-5.1')
-  const [appType, setAppType] = useState<'web' | 'h5' | 'static'>('web')
+  // 应用类型已统一：移除 Web/H5/Static 选项，统一生成具有前后端、可预览、可使用的轻应用
+  const appType = APP_TYPE
   const [taskMode, setTaskMode] = useState<'default' | 'coding'>('coding')
   const [pendingImages, setPendingImages] = useState<
     Array<{ id: string; url: string; data: string; mimeType: string }>
@@ -164,7 +168,6 @@ export function TaskForm({
     }
     onSubmit({
       prompt: prompt.trim(),
-      appType,
       selectedModel,
       mode: taskMode,
       installDependencies,
@@ -209,7 +212,7 @@ export function TaskForm({
             <Textarea
               ref={textareaRef}
               id="prompt"
-              placeholder="描述您希望 Agent 做什么... (使用 Ctrl+V 粘贴图片)"
+              placeholder="用一句话描述你想搭建的轻应用，我会自动生成完整的前后端文件并立刻可预览使用... (可粘贴图片)"
               value={prompt}
               onChange={(e) => setPrompt(e.target.value)}
               onKeyDown={handleTextareaKeyDown}
@@ -244,23 +247,6 @@ export function TaskForm({
                   <Code2 className="h-3 w-3" />
                   {taskMode === 'coding' ? 'Coding' : 'Default'}
                 </button>
-                <span className="text-muted-foreground/50">·</span>
-                <div className="flex items-center gap-1">
-                  {(['web', 'h5', 'static'] as const).map((t) => (
-                    <button
-                      key={t}
-                      type="button"
-                      onClick={() => setAppType(t)}
-                      className={`text-xs font-medium px-2 py-1 rounded-full border transition-colors ${
-                        appType === t
-                          ? 'bg-primary/10 text-primary border-primary/30'
-                          : 'text-muted-foreground border-border hover:border-primary/30'
-                      }`}
-                    >
-                      {t === 'web' ? 'Web' : t === 'h5' ? 'H5' : 'Static'}
-                    </button>
-                  ))}
-                </div>
                 <span className="text-muted-foreground/50">·</span>
                 <div className="flex items-center gap-2 text-sm text-muted-foreground px-2 h-8">
                   <Select

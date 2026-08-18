@@ -73,6 +73,11 @@ export class LocalDockerSandbox {
     await this.removeContainer(containerName).catch(() => {})
 
     // 5. docker run 创建并启动容器
+    // 注入 VITE_API_TARGET，让容器内应用的 /api 请求能代理到宿主机后端。
+    // 容器内 localhost 指向容器自身，必须用 host.docker.internal 访问宿主机。
+    const backendPort = Number(process.env.PORT) || 3001
+    const apiTarget =
+      process.env.VITE_API_TARGET || `http://host.docker.internal:${backendPort}`
     const args = [
       'run',
       '-d',
@@ -80,6 +85,8 @@ export class LocalDockerSandbox {
       containerName,
       '-p',
       `${hostPort}:${CONTAINER_PORT}`,
+      '-e',
+      `VITE_API_TARGET=${apiTarget}`,
       '-v',
       `${absWorkspace}:/app`,
       '-w',

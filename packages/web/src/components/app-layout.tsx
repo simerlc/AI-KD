@@ -22,7 +22,6 @@ interface TasksContextType {
   isSidebarResizing: boolean
   addTaskOptimistically: (taskData: {
     prompt: string
-    appType: string
     selectedModel: string
     mode: 'default' | 'coding'
     installDependencies: boolean
@@ -230,7 +229,6 @@ export function AppLayout({ children, initialSidebarWidth, initialSidebarOpen, i
 
   const addTaskOptimistically = (taskData: {
     prompt: string
-    appType: string
     selectedModel: string
     mode: 'default' | 'coding'
     installDependencies: boolean
@@ -247,7 +245,8 @@ export function AppLayout({ children, initialSidebarWidth, initialSidebarOpen, i
       title: null,
       repoUrl: null,
       envId: null,
-      appType: taskData.appType,
+      // 应用类型已统一：统一生成「前后端可用的轻应用」，前端不再由用户选择
+      appType: 'web',
       selectedAgent: null,
       selectedModel: taskData.selectedModel,
       installDependencies: taskData.installDependencies,

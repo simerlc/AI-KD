@@ -23,8 +23,9 @@ import { getLLMProvider } from '../llm/index.js'
 import type { LLMMessage, LLMProvider } from '../llm/types.js'
 import { createLLMClient } from '../llm/adapter.js'
 import { Orchestrator } from '@aikd/agent'
-import type { AppType } from '@aikd/shared'
+import type { AppType, AppModel } from '@aikd/shared'
 import { writeWorkspaceFiles } from '../lib/workspace.js'
+import { initializeBackend } from '../services/backend-init.service.js'
 import { getSandbox } from '../sandbox/index.js'
 import { loadTaskMessagesPage } from '../agent/message-history.service.js'
 import { toSessionInfo } from '../agent/session-projection.service.js'
@@ -492,6 +493,7 @@ async function handleSessionPrompt(
     try {
       const result = await orchestrator.run({
         prompt,
+        appId: sessionId,
         appType: (task.appType as AppType) || undefined,
         appName: task.title || undefined,
         existingAppModel,
@@ -529,6 +531,23 @@ async function handleSessionPrompt(
         currentVersion: result.appModel.version,
         appType: result.appModel.type,
       })
+
+      // ─── 后端初始化：根据 dataSources 建表 + 写入数据 ───
+      // 让 AI 生成的应用拥有真实的后端数据存取能力，而非仅前端 Mock。
+      try {
+        const backendResult = await initializeBackend(sessionId, result.appModel)
+        if (backendResult.tableIds.length > 0) {
+          sendChunk(
+            `\n[Backend] 数据库初始化完成：${backendResult.tableIds.length} 张表，${backendResult.recordCount} 条记录\n`,
+          )
+        }
+        for (const warning of backendResult.warnings) {
+          sendChunk(`[Backend] 警告：${warning}\n`)
+        }
+      } catch (err) {
+        console.error('[ACP] Backend init failed', err)
+        sendChunk('\n[Backend] 数据库初始化失败，应用将以只读模式运行\n')
+      }
 
       // 将代码文件写入工作区
       try {

@@ -15,18 +15,7 @@ import {
   AlertDialogTitle,
 } from '@/components/ui/alert-dialog'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
-import {
-  AlertCircle,
-  Trash2,
-  Square,
-  StopCircle,
-  CheckSquare,
-  X,
-  Clock,
-  Globe,
-  Smartphone,
-  FileText,
-} from 'lucide-react'
+import { AlertCircle, Trash2, Square, StopCircle, CheckSquare, X, Clock } from 'lucide-react'
 import { toast } from 'sonner'
 import { cn } from '@/lib/utils'
 import { SharedHeader } from '@/components/shared-header'
@@ -47,18 +36,6 @@ function getTimeAgo(date: Date | number | string): string {
   if (diffInDays === 1) return 'yesterday'
   if (diffInDays < 7) return `${diffInDays} days ago`
   return new Date(date).toLocaleDateString()
-}
-
-function getAppTypeIcon(appType: string | null | undefined) {
-  if (appType === 'h5') return Smartphone
-  if (appType === 'static') return FileText
-  return Globe
-}
-
-function getAppTypeLabel(appType: string | null | undefined) {
-  if (appType === 'h5') return 'H5'
-  if (appType === 'static') return 'Static'
-  return 'Web'
 }
 
 export function TasksListPage() {
@@ -285,15 +262,6 @@ export function TasksListPage() {
                           )}
                         </div>
                         <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
-                          {task.appType && (
-                            <div className="flex items-center gap-1">
-                              {(() => {
-                                const AppTypeIcon = getAppTypeIcon(task.appType)
-                                return <AppTypeIcon className="w-3 h-3" />
-                              })()}
-                              <span>{getAppTypeLabel(task.appType)}</span>
-                            </div>
-                          )}
                           {task.previewUrl && (
                             <div className="flex items-center gap-1">
                               <span className="inline-block h-1.5 w-1.5 rounded-full bg-green-500" />

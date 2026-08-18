@@ -163,3 +163,49 @@ export const appVersions = sqliteTable(
     appIdIdx: index('app_versions_app_id_idx').on(table.appId),
   }),
 )
+
+// ─── Data Models（动态数据表定义）───────────────────────────────────────────
+// 存储 AI 生成应用自定义的「表」结构（表名 + 字段定义）。
+// 每个应用（task）可定义多张表，字段类型为有限集（string/number/...）。
+// 字段定义以 JSON 字符串存储（fieldsJson）。
+
+export const dataModels = sqliteTable(
+  'data_models',
+  {
+    id: text('id').primaryKey(),
+    appId: text('app_id')
+      .notNull()
+      .references(() => tasks.id, { onDelete: 'cascade' }),
+    name: text('name').notNull(), // 表名，如 'customers'
+    fieldsJson: text('fields_json').notNull(), // TableField[] JSON 字符串
+    createdAt: integer('created_at').notNull().$defaultFn(now),
+    updatedAt: integer('updated_at').notNull().$defaultFn(now),
+  },
+  (table) => ({
+    appNameIdx: index('data_models_app_name_idx').on(table.appId, table.name),
+  }),
+)
+
+// ─── Data Records（动态数据记录）───────────────────────────────────────────
+// 存储数据表的具体行。dataJson 为 JSON 对象（字段名 → JSON 值）。
+// 通过 appId + tableId 关联到具体应用的表。
+
+export const dataRecords = sqliteTable(
+  'data_records',
+  {
+    id: text('id').primaryKey(),
+    appId: text('app_id')
+      .notNull()
+      .references(() => tasks.id, { onDelete: 'cascade' }),
+    tableId: text('table_id')
+      .notNull()
+      .references(() => dataModels.id, { onDelete: 'cascade' }),
+    dataJson: text('data_json').notNull(), // 记录 JSON 对象
+    createdAt: integer('created_at').notNull().$defaultFn(now),
+    updatedAt: integer('updated_at').notNull().$defaultFn(now),
+  },
+  (table) => ({
+    tableIdx: index('data_records_table_idx').on(table.tableId),
+    appTableIdx: index('data_records_app_table_idx').on(table.appId, table.tableId),
+  }),
+)
