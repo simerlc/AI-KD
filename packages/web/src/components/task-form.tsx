@@ -1,15 +1,16 @@
 import { useState, useEffect, useRef } from 'react'
 import { Button } from '@/components/ui/button'
 import { Textarea } from '@/components/ui/textarea'
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
+import { Select, SelectContent, SelectItem, SelectTrigger } from '@/components/ui/select'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
 import { Loader2, ArrowUp, X, Cable, Code2, ImageIcon } from 'lucide-react'
 import { setInstallDependencies, setMaxDuration, setKeepAlive, setEnableBrowser } from '@/lib/utils/cookies'
 import { useAtom, useSetAtom, useAtomValue } from 'jotai'
 import { sessionAtom } from '@/lib/atoms/session'
 import { taskPromptAtom } from '@/lib/atoms/task'
-import { lastSelectedModelAtomFamily } from '@/lib/atoms/model'
-import type { ModelInfo } from '@aikd/shared'
+import { providersAtom, selectedModelAtom, selectModelAtom, loadProvidersAtom } from '@/lib/atoms/providers'
+import { toSelectedKey, fromSelectedKey } from '@/lib/providers/types'
+import type { ModelProvider } from '@/lib/providers/types'
 
 interface TaskFormProps {
   onSubmit: (data: {
@@ -34,8 +35,6 @@ interface TaskFormProps {
 // 此处保持为常量名，便于后续扩展回多类型时一处修改即可。
 const APP_TYPE = 'web'
 
-const SELECTED_AGENT = 'aikd'
-
 export function TaskForm({
   onSubmit,
   isSubmitting,
@@ -47,7 +46,6 @@ export function TaskForm({
   const session = useAtomValue(sessionAtom)
   const userId = session?.user?.id || ''
   const [prompt, setPrompt] = useAtom(taskPromptAtom)
-  const [selectedModel, setSelectedModel] = useState<string>('glm-5.1')
   // 应用类型已统一：移除 Web/H5/Static 选项，统一生成具有前后端、可预览、可使用的轻应用
   const appType = APP_TYPE
   const [taskMode, setTaskMode] = useState<'default' | 'coding'>('coding')
@@ -56,22 +54,29 @@ export function TaskForm({
   >([])
   const imageInputRef = useRef<HTMLInputElement>(null)
 
-  const [models, setModels] = useState<ModelInfo[]>([{ id: 'glm-5.1', name: 'GLM 5.1' }])
+  // ── Provider / 模型选择 ──────────────────────────────
+  const providers = useAtomValue(providersAtom)
+  const selectedModel = useAtomValue(selectedModelAtom)
+  const setSelectModel = useSetAtom(selectModelAtom)
+  const setLoadProviders = useSetAtom(loadProvidersAtom)
 
+  // 首次加载 Provider 列表
   useEffect(() => {
-    // 从后端 /api/models 获取用户配置的 API 模型列表
-    fetch('/api/models')
-      .then((r) => r.json())
-      .then((data: { models: ModelInfo[] }) => {
-        if (Array.isArray(data.models) && data.models.length > 0) {
-          setModels(data.models)
-          setSelectedModel(data.models[0].id)
+    void setLoadProviders()
+  }, [setLoadProviders])
+
+  // 若尚未选择模型且存在可用模型，自动选中第一个
+  useEffect(() => {
+    if (!selectedModel) {
+      for (const p of providers) {
+        if (!p.enabled || !p.hasApiKey) continue
+        if (p.models.length > 0) {
+          void setSelectModel({ providerId: p.id, modelId: p.models[0].id })
+          break
         }
-      })
-      .catch(() => {
-        /* silently ignore */
-      })
-  }, [])
+      }
+    }
+  }, [providers, selectedModel, setSelectModel])
 
   const [installDependencies, setInstallDependenciesState] = useState(initialInstallDependencies)
   const [maxDuration, setMaxDurationState] = useState(initialMaxDuration)
@@ -121,9 +126,6 @@ export function TaskForm({
     }
   }, [])
 
-  const savedModelAtom = lastSelectedModelAtomFamily(SELECTED_AGENT)
-  const setSavedModel = useSetAtom(savedModelAtom)
-
   const processImageFile = (file: File) => {
     if (!file.type.startsWith('image/')) return
     const reader = new FileReader()
@@ -166,9 +168,10 @@ export function TaskForm({
     if (!prompt.trim()) {
       return
     }
+    // selectedModel 传 "providerId::modelId" 格式，后端据此动态创建对应 Provider
     onSubmit({
       prompt: prompt.trim(),
-      selectedModel,
+      selectedModel: selectedModel ? toSelectedKey(selectedModel) : (providers[0]?.id || ''),
       mode: taskMode,
       installDependencies,
       maxDuration,
@@ -249,26 +252,14 @@ export function TaskForm({
                 </button>
                 <span className="text-muted-foreground/50">·</span>
                 <div className="flex items-center gap-2 text-sm text-muted-foreground px-2 h-8">
-                  <Select
-                    value={selectedModel}
-                    onValueChange={(v) => {
-                      setSelectedModel(v)
-                      setSavedModel(v)
+                  <ProviderModelSelect
+                    value={selectedModel ? toSelectedKey(selectedModel) : ''}
+                    onValueChange={(key) => {
+                      const sel = fromSelectedKey(key)
+                      if (sel) void setSelectModel(sel)
                     }}
-                  >
-                    <SelectTrigger className="h-7 border-0 shadow-none px-1 py-0 text-sm text-muted-foreground hover:text-foreground bg-transparent focus:ring-0 gap-1 w-auto min-w-[120px]">
-                      <span className="truncate">
-                        {models.find((m) => m.id === selectedModel)?.name || selectedModel}
-                      </span>
-                    </SelectTrigger>
-                    <SelectContent>
-                      {models.map((m) => (
-                        <SelectItem key={m.id} value={m.id}>
-                          <span>{m.name}</span>
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
+                    providers={providers}
+                  />
                 </div>
               </div>
 
@@ -320,5 +311,51 @@ export function TaskForm({
         </div>
       </form>
     </div>
+  )
+}
+
+/** 模型选择下拉：展示所有已配置 Provider 下的模型（层级形式） */
+function ProviderModelSelect({
+  value,
+  onValueChange,
+  providers,
+}: {
+  value: string
+  onValueChange: (key: string) => void
+  providers: ModelProvider[]
+}) {
+  const options: Array<{ key: string; group: string; label: string }> = []
+  for (const p of providers) {
+    if (!p.enabled || !p.hasApiKey) continue
+    for (const m of p.models) {
+      if (!m.enabled) continue
+      options.push({
+        key: toSelectedKey({ providerId: p.id, modelId: m.id }),
+        group: p.displayName,
+        label: m.displayName || m.name,
+      })
+    }
+  }
+
+  const current = options.find((o) => o.key === value)
+
+  return (
+    <Select value={value} onValueChange={onValueChange}>
+      <SelectTrigger className="h-7 border-0 shadow-none px-1 py-0 text-sm text-muted-foreground hover:text-foreground bg-transparent focus:ring-0 gap-1 w-auto min-w-[120px]">
+        <span className="truncate">
+          {current ? `${current.group} / ${current.label}` : value || '选择模型'}
+        </span>
+      </SelectTrigger>
+      <SelectContent>
+        {options.length === 0 && (
+          <div className="px-2 py-3 text-center text-sm text-muted-foreground">请先在「模型」页配置</div>
+        )}
+        {options.map((opt) => (
+          <SelectItem key={opt.key} value={opt.key}>
+            {opt.group} / {opt.label}
+          </SelectItem>
+        ))}
+      </SelectContent>
+    </Select>
   )
 }

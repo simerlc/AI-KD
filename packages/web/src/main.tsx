@@ -7,6 +7,7 @@ import { AppLayout } from './components/app-layout'
 import { HomePage } from './pages/HomePage'
 import { TaskPage } from './pages/TaskPage'
 import { TasksListPage } from './pages/TasksListPage'
+import { ModelPage } from './pages/ModelPage'
 import { ThemeProvider } from './components/theme-provider'
 import './index.css'
 
@@ -60,6 +61,14 @@ function App() {
           element={
             <AppLayout>
               <TaskPage />
+            </AppLayout>
+          }
+        />
+        <Route
+          path="/models"
+          element={
+            <AppLayout>
+              <ModelPage />
             </AppLayout>
           }
         />

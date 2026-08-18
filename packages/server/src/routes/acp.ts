@@ -19,7 +19,7 @@ import {
   type SessionDeleteResult,
   type ModelInfo,
 } from '@aikd/shared'
-import { getLLMProvider } from '../llm/index.js'
+import { createProviderFromModel } from '../llm/index.js'
 import type { LLMMessage, LLMProvider } from '../llm/types.js'
 import { createLLMClient } from '../llm/adapter.js'
 import { Orchestrator } from '@aikd/agent'
@@ -404,9 +404,19 @@ async function handleSessionPrompt(
     return c.json(rpcErr(id, JSON_RPC_ERRORS.INVALID_REQUEST, 'A prompt turn is already in progress'))
   }
 
+  // 根据任务所选 Provider/模型动态创建 LLM Provider；未指定则回退 env 默认
+  // selectedModel 可能为纯模型名（旧格式）或 "providerId::modelId"（新格式）
   let provider: LLMProvider
   try {
-    provider = getLLMProvider()
+    const sel = task.selectedModel || ''
+    const parts = sel.includes('::') ? sel.split('::') : []
+    const providerRef =
+      parts.length === 2
+        ? { providerId: parts[0], modelId: parts[1] }
+        : parts.length === 1
+          ? { providerId: parts[0] }
+          : undefined
+    provider = await createProviderFromModel(providerRef)
   } catch (error) {
     console.error('[ACP] LLM provider not configured')
     return c.json(rpcErr(id, JSON_RPC_ERRORS.INTERNAL, (error as Error).message))

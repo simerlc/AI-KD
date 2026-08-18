@@ -9,18 +9,35 @@ import type {
 } from './types'
 import { getLLMConfig } from './types'
 
+export interface ProviderRuntimeConfig {
+  apiKey: string
+  baseUrl: string
+  model: string
+  supportsImages?: boolean
+}
+
 export class OpenAICompatibleProvider implements LLMProvider {
   name = 'openai-compatible'
   private client: OpenAI
   private model: string
 
-  constructor() {
-    const config = getLLMConfig()
+  constructor(config?: Partial<ProviderRuntimeConfig>) {
+    const envConfig = getLLMConfig()
+    const resolved = {
+      apiKey: config?.apiKey || envConfig.apiKey,
+      baseUrl: config?.baseUrl || envConfig.baseUrl,
+      model: config?.model || envConfig.model,
+    }
     this.client = new OpenAI({
-      apiKey: config.apiKey,
-      baseURL: config.baseUrl,
+      apiKey: resolved.apiKey,
+      baseURL: resolved.baseUrl,
     })
-    this.model = config.model
+    this.model = resolved.model
+  }
+
+  /** 切换模型（保持 client 不变） */
+  setModel(model: string) {
+    this.model = model
   }
 
   async chatStream(options: LLMCompleteOptions, onChunk: (chunk: LLMStreamChunk) => void): Promise<void> {
@@ -81,8 +98,42 @@ export class OpenAICompatibleProvider implements LLMProvider {
   }
 }
 
+// ─── 按 Provider 配置动态创建 ──────────────────────────────
+
+/**
+ * 根据已保存的 ModelProvider 配置创建一个 LLMProvider 实例。
+ * 如果找不到或未配置，回退到 env 默认 provider。
+ */
+export async function createProviderFromModel(modelRef?: {
+  providerId?: string
+  modelId?: string
+}): Promise<LLMProvider> {
+  try {
+    // 动态 import providers 模块，避免循环依赖（sync 调用由调用方 await）
+    const { getProvider } = await import('../providers/storage')
+    const providerId = modelRef?.providerId
+    if (providerId) {
+      const provider = getProvider(providerId)
+      if (provider && provider.enabled && provider.apiKey) {
+        const modelId = modelRef.modelId || provider.models[0]?.id
+        if (modelId) {
+          return new OpenAICompatibleProvider({
+            apiKey: provider.apiKey,
+            baseUrl: provider.baseUrl,
+            model: modelId,
+          })
+        }
+      }
+    }
+  } catch {
+    // ignore: fall back to env provider
+  }
+  return new OpenAICompatibleProvider()
+}
+
 let _provider: OpenAICompatibleProvider | null = null
 
+/** 兼容：使用 env 配置的默认 provider */
 export function getLLMProvider(): LLMProvider {
   if (!_provider) {
     _provider = new OpenAICompatibleProvider()

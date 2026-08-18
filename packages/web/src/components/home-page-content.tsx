@@ -2,11 +2,12 @@ import { useState } from 'react'
 import { TaskForm } from '@/components/task-form'
 import { SharedHeader } from '@/components/shared-header'
 import { toast } from 'sonner'
-import { useNavigate } from 'react-router'
+import { useNavigate, Link } from 'react-router'
 import { useTasks } from '@/components/app-layout'
 import { useSetAtom } from 'jotai'
 import { taskPromptAtom } from '@/lib/atoms/task'
-import { Sparkles, LayoutTemplate } from 'lucide-react'
+import { Sparkles, LayoutTemplate, Settings2 } from 'lucide-react'
+import { Button } from '@/components/ui/button'
 
 // 常用模板快捷入口（点击后自动填入 prompt 并聚焦）
 const TEMPLATES = [
@@ -108,7 +109,17 @@ export function HomePageContent({ maxSandboxDuration = 300 }: { maxSandboxDurati
   return (
     <div className="flex-1 bg-background flex flex-col">
       <div className="p-3">
-        <SharedHeader leftActions={null} />
+        <SharedHeader
+          leftActions={null}
+          extraActions={
+            <Button asChild variant="outline" size="sm" className="h-8">
+              <Link to="/models" className="flex items-center gap-1.5">
+                <Settings2 className="h-3.5 w-3.5" />
+                模型
+              </Link>
+            </Button>
+          }
+        />
       </div>
 
       <div className="flex-1 flex items-center justify-center px-4 pb-20 md:pb-4">

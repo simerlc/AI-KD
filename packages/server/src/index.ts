@@ -35,6 +35,7 @@ import acpRoutes from './routes/acp'
 import tasksRoutes from './routes/tasks'
 import miscRoutes from './routes/misc'
 import dataRoutes from './routes/data'
+import providersRoutes from './routes/providers'
 
 const app = new Hono<AppEnv>()
 
@@ -54,6 +55,7 @@ app.get('/health', (c) => c.json({ status: 'ok' }))
 app.route('/api/agent', acpRoutes)
 app.route('/api/tasks', tasksRoutes)
 app.route('/api/data', dataRoutes)
+app.route('/api/providers', providersRoutes)
 app.route('/api', miscRoutes)
 
 // Static file serving for production (web build output)
