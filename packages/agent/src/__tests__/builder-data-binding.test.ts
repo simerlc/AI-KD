@@ -108,8 +108,9 @@ describe('BuilderAgent - 数据绑定生成', () => {
     const pageFile = files.find((f) => f.path === 'src/pages/page_list.tsx')!
     const content = pageFile.content
 
-    // Table 使用 customersData.map 渲染
-    expect(content).toContain('customersData.map')
+    // Table 从 customersData 渲染（启用搜索时使用 customersDataFiltered ?? customersData 兜底）
+    expect(content).toContain('customersDataFiltered ?? customersData')
+    expect(content).toContain('customersData).map')
     expect(content).toContain("rec.data['name']")
     expect(content).toContain("rec.data['phone']")
   })
@@ -121,7 +122,8 @@ describe('BuilderAgent - 数据绑定生成', () => {
     const pageFile = files.find((f) => f.path === 'src/pages/page_list.tsx')!
     const content = pageFile.content
 
-    expect(content).toContain("createRecord('customers', customersForm)")
+    // 提交使用归一化后的 payload（可能等于 customersForm 或做类型转换）
+    expect(content).toMatch(/createRecord\('customers', (customersForm|payload)\)/)
     // 提交后刷新
     expect(content).toContain('await loadCustomers()')
   })

@@ -1,6 +1,7 @@
-// @aikd/component-registry - 组件注册表
+// @aikd/component-registry - 组件注册表 / Component Library
 export * from './types'
 export * from './registry'
+export * from './usage-examples'
 export * from './components/layout'
 export * from './components/text'
 export * from './components/button'
@@ -8,3 +9,4 @@ export * from './components/form'
 export * from './components/display'
 export * from './components/navigation'
 export * from './components/feedback'
+export * from './components/advanced'

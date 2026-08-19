@@ -1,4 +1,10 @@
 // @aikd/agent - Planner/Builder/Tester Agents + Orchestrator + Action/Event Engine
+// + Multi-Agent 架构（Requirement/Blueprint/Coding/Review/Fix）
+// + Runtime Agent（Tool Calling：filesystem/terminal/browser）
+// + Auto-Debug（Generate → Run → Review → Fix → Run Again）
+export * from './multi-agent'
+export * from './runtime-agent'
+export * from './auto-debug'
 export * from './types'
 export * from './utils'
 export * from './planner'

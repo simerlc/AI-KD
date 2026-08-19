@@ -118,6 +118,8 @@ export class BuilderAgent {
           dependencies: {
             react: '^18.3.0',
             'react-dom': '^18.3.0',
+            'react-router-dom': '^6.26.0',
+            antd: '^5.20.0',
           },
           devDependencies: {
             '@types/react': '^18.3.0',
@@ -628,6 +630,46 @@ ${componentJsx}
     return []
   }
 
+  /**
+   * 从数据源示例数据推断字段类型（供 Form 提交做类型归一化）。
+   * 依据 data 首元素的运行时类型：number/boolean → 对应类型，否则 string。
+   * 返回 { 字段名: 'number'|'boolean'|'string' }。
+   */
+  private inferFieldTypes(appModel: AppModel, dataSource: string): Record<string, 'number' | 'boolean' | 'string'> {
+    const all = appModel.schema?.dataSources ?? []
+    const ds = all.find((d) => d.id === dataSource || d.id === `database.${dataSource}`)
+    if (!ds) return {}
+    const rows = Array.isArray(ds.data) ? (ds.data as unknown[]) : []
+    const first = rows[0] as Record<string, unknown> | undefined
+    if (!first || typeof first !== 'object') return {}
+    const types: Record<string, 'number' | 'boolean' | 'string'> = {}
+    for (const [key, value] of Object.entries(first)) {
+      if (typeof value === 'number') types[key] = 'number'
+      else if (typeof value === 'boolean') types[key] = 'boolean'
+      else types[key] = 'string'
+    }
+    return types
+  }
+
+  /**
+   * 生成表单提交前的类型归一化代码：把 form state 中的字符串值按字段类型转换，
+   * 避免后端严格类型校验（number/boolean）因前端字符串提交而失败。
+   * 返回形如：
+   *   const payload = { ...databaseProductsForm, price: Number(databaseProductsForm['price']), stock: Number(databaseProductsForm['stock']) }
+   */
+  private buildFormPayloadCode(formStateName: string, fieldTypes: Record<string, 'number' | 'boolean' | 'string'>, pad: string): string {
+    const convertFields = Object.entries(fieldTypes).filter(([, type]) => type === 'number' || type === 'boolean')
+    if (convertFields.length === 0) {
+      // 无需要转换的字段：直接使用 form state
+      return `${pad}      const payload = ${formStateName}`
+    }
+    const parts = convertFields.map(([key, type]) => {
+      const convert = type === 'number' ? 'Number' : 'Boolean'
+      return `'${this.escapeJsString(key)}': ${formStateName}['${this.escapeJsString(key)}'] === '' || ${formStateName}['${this.escapeJsString(key)}'] === undefined ? undefined : ${convert}(${formStateName}['${this.escapeJsString(key)}'])`
+    })
+    return `${pad}      const payload = { ...${formStateName}, ${parts.join(', ')} }`
+  }
+
   /** 递归判断组件树是否包含任何输入类组件（Input/Textarea/Select） */
   private hasInputInTree(nodes: ComponentNode[]): boolean {
     const inputTypes = new Set(['Input', 'Textarea', 'Select'])
@@ -821,15 +863,20 @@ ${componentJsx}
             ? children.map((c) => this.renderComponent(c, indent + 2, dataSource, appModel)).join('\n')
             : this.generateRuntimeFormFields(dataSource, formStateName, setFormName, pad)
           // 编辑模式：提交时携带 :id 调用 updateRecord
+          // 提交前做类型归一化：把 number/boolean 字段的字符串值转成正确类型，
+          // 避免后端严格类型校验（typeof number）因前端字符串提交而失败。
+          const fieldTypes = appModel ? this.inferFieldTypes(appModel, dataSource) : {}
+          const payloadCode = this.buildFormPayloadCode(formStateName, fieldTypes, `${pad}      `)
           const submitBody = isEdit
-            ? `${pad}      await updateRecord('${dataSource}', props.id ?? '', ${formStateName})`
-            : `${pad}      await createRecord('${dataSource}', ${formStateName})`
+            ? `${pad}      await updateRecord('${dataSource}', props.id ?? '', payload)`
+            : `${pad}      await createRecord('${dataSource}', payload)`
           const afterSubmit = isEdit
             ? `${pad}      window.alert('保存成功')`
             : `${pad}      ${setFormName}({})\n${pad}      await ${loadName}()`
           return `${pad}<form onSubmit={async (e) => {
 ${pad}    e.preventDefault()
 ${pad}    try {
+${payloadCode}
 ${submitBody}
 ${afterSubmit}
 ${pad}    } catch (err) {
@@ -890,7 +937,7 @@ ${pad}  }} style={{ display: ${this.jsStr(node.props.layout === 'horizontal' ? '
           : []
         const fieldList = declaredFields.length
           ? declaredFields
-          : dataSource
+          : dataSource && typeof dataSource === 'string' && appModel
             ? this.inferFields(appModel, dataSource).map((k) => ({ key: k, label: k }))
             : []
 
@@ -921,7 +968,7 @@ ${pad}  }} style={{ display: ${this.jsStr(node.props.layout === 'horizontal' ? '
           ? (node.props.columns as Array<{ key?: string; title?: string }>)
           : []
         const dsId = node.props.dataSource
-        const inferredFields = dsId && typeof dsId === 'string' ? this.inferFields(appModel, dsId) : []
+        const inferredFields = dsId && typeof dsId === 'string' && appModel ? this.inferFields(appModel, dsId) : []
         let columns: Array<{ key: string; title: string }>
         if (rawColumns.length > 0 && rawColumns.some((c) => c.key && c.key.length > 0)) {
           columns = rawColumns
@@ -953,14 +1000,14 @@ ${pad}  }} style={{ display: ${this.jsStr(node.props.layout === 'horizontal' ? '
           const actionHead = hasActions ? `<th>操作</th>` : ''
           const actionCells =
             hasActions
-              ? `\n${pad}          <td style={{ display: 'flex', gap: '8px' }}>\n${
+              ? `\n${pad}          <td>\n${pad}            <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>\n${
                   actions
                     .map((act) => {
                       const label =
                         act === 'detail' ? '详情' : act === 'edit' ? '编辑' : act === 'delete' ? '删除' : act
                       if (act === 'delete') {
                         // handleDelete 使用完整 dataSource id（与 api.ts 的 TABLES key 一致）
-                        return `${pad}            <button className="btn btn-danger btn-small" onClick={() => handleDelete('${dataSource}', rec.id)}>${label}</button>`
+                        return `${pad}              <button className="btn btn-danger btn-small" onClick={() => handleDelete('${dataSource}', rec.id)}>${label}</button>`
                       }
                       // 链接使用 short name 前缀，与 App 路由 /<name>/* 匹配。
                       // 必须用 JSX 模板表达式包裹（href={`...`}），否则 ${rec.id} 会变成字面量。
@@ -968,10 +1015,10 @@ ${pad}  }} style={{ display: ${this.jsStr(node.props.layout === 'horizontal' ? '
                         act === 'detail'
                           ? `/${dsBase}/\${rec.id}`
                           : `/${dsBase}/\${rec.id}/edit`
-                      return `${pad}            <a className="btn btn-default btn-small" href={\`${hrefTpl}\`}>${label}</a>`
+                      return `${pad}              <a className="btn btn-default btn-small" href={\`${hrefTpl}\`}>${label}</a>`
                     })
                     .join('\n')
-                }\n${pad}          </td>`
+                }\n${pad}            </div>\n${pad}          </td>`
               : ''
 
           // 表头：动态列或静态列；操作列（若有）放入同一 <tr>，避免 DOM 嵌套错误
@@ -987,7 +1034,11 @@ ${pad}  }} style={{ display: ${this.jsStr(node.props.layout === 'horizontal' ? '
             : columns
                 .map((col) => `${pad}          <td>{String(rec.data['${this.escapeJsString(col.key)}'] ?? '')}</td>`)
                 .join('\n')
-          const bodyJsx = `${pad}  <tbody>\n${pad}    {${dataExpr}.length > 0 ? (\n${pad}      ${dataExpr}.map((rec) => (\n${pad}        <tr key={rec.id}>\n${rowCells}${actionCells}\n${pad}        </tr>\n${pad}      ))\n${pad}    ) : (\n${pad}      <tr>\n${pad}        <td colSpan={${columns.length + (hasActions ? 1 : 0) || 1}} style={{ padding: '24px', textAlign: 'center', color: '#999999' }}>暂无数据</td>\n${pad}      </tr>\n${pad}    )}\n${pad}  </tbody>\n`
+          // 暂无数据行的 colSpan：静态列用列数+操作列；动态列在运行时计算实际列数
+          const emptyColSpan = dynamicCols
+            ? `Math.max(${stateName}[0] ? Object.keys(${stateName}[0].data).length : 0, 1)${hasActions ? ' + 1' : ''}`
+            : `${Math.max(columns.length, 1) + (hasActions ? 1 : 0)}`
+          const bodyJsx = `${pad}  <tbody>\n${pad}    {${dataExpr}.length > 0 ? (\n${pad}      ${dataExpr}.map((rec) => (\n${pad}        <tr key={rec.id}>\n${rowCells}${actionCells}\n${pad}        </tr>\n${pad}      ))\n${pad}    ) : (\n${pad}      <tr>\n${pad}        <td colSpan={${emptyColSpan}} style={{ padding: '24px', textAlign: 'center', color: '#999999' }}>暂无数据</td>\n${pad}      </tr>\n${pad}    )}\n${pad}  </tbody>\n`
 
           // 搜索框 + 新增按钮（CRUD 工具栏）；链接使用 short name 前缀
           const toolbar = searchable
@@ -998,6 +1049,11 @@ ${pad}  }} style={{ display: ${this.jsStr(node.props.layout === 'horizontal' ? '
         }
 
         const rows = Array.isArray(node.props.rows) ? (node.props.rows as Array<Record<string, unknown>>) : []
+        // 静态表头：按声明的列渲染（与动态列区分）
+        const headJsx =
+          columns.length > 0
+            ? `${pad}  <thead>\n${pad}    <tr>\n${columns.map((col) => `${pad}      <th>${this.escapeHtml(col.title || col.key)}</th>`).join('\n')}\n${pad}    </tr>\n${pad}  </thead>\n`
+            : ''
         const bodyJsx =
           rows.length > 0
             ? `${pad}  <tbody>\n${rows
@@ -1043,6 +1099,53 @@ ${pad}  }} style={{ display: ${this.jsStr(node.props.layout === 'horizontal' ? '
 
       case 'Modal':
         return `${pad}<div style={{ display: ${node.props.visible ? 'block' : 'none'}, position: 'fixed', top: 0, left: 0, right: 0, bottom: 0, background: 'rgba(0,0,0,0.5)', zIndex: 1000 }}>\n${pad}  <div style={{ maxWidth: ${this.jsStr(node.props.width)}, margin: '100px auto', background: 'white', borderRadius: '8px', padding: '24px' }}>\n${pad}    <h3>${this.escapeHtml(String(node.props.title || ''))}</h3>\n${childJsx}\n${pad}  </div>\n${pad}</div>`
+
+      // ─── 高级 / 复合组件（Component Library 复用） ──────
+      case 'Dashboard': {
+        // 统计卡片 + 子组件（Chart 等）聚合展示
+        const cards = Array.isArray(node.props.cards)
+          ? (node.props.cards as Array<Record<string, unknown>>)
+          : []
+        const cardJsx = cards
+          .map(
+            (card) =>
+              `${pad}    <div style={{ flex: 1, minWidth: '180px', background: 'white', borderRadius: '8px', padding: '16px', boxShadow: '0 1px 3px rgba(0,0,0,0.1)' }}>\n${pad}      <div style={{ fontSize: '13px', color: '#888' }}>${this.escapeHtml(String(card.label ?? ''))}</div>\n${pad}      <div style={{ fontSize: '24px', fontWeight: 600, marginTop: '4px' }}>${this.escapeHtml(String(card.value ?? ''))}</div>\n${pad}      ${card.trend ? `<div style={{ fontSize: '12px', color: '${String(card.trend ?? '').startsWith('-') ? '#ef4444' : '#22c55e'}' }}>${this.escapeHtml(String(card.trend))}</div>` : ''}\n${pad}    </div>`,
+          )
+          .join('\n')
+        const title = node.props.title
+          ? `${pad}  <h1 style={{ fontSize: '22px', marginBottom: '16px' }}>${this.escapeHtml(String(node.props.title))}</h1>\n`
+          : ''
+        return `${title}${pad}<div style={{ display: 'flex', flexWrap: 'wrap', gap: '16px', marginBottom: '20px' }}>\n${cardJsx}\n${pad}</div>\n${childJsx}`
+      }
+
+      case 'StatCard': {
+        const label = node.props.label
+        const value = node.props.value
+        const trend = node.props.trend
+        return `${pad}<div style={{ background: 'white', borderRadius: '8px', padding: '16px', boxShadow: '0 1px 3px rgba(0,0,0,0.1)' }}>\n${pad}  <div style={{ fontSize: '13px', color: '#888' }}>${this.escapeHtml(String(label ?? ''))}</div>\n${pad}  <div style={{ fontSize: '24px', fontWeight: 600, marginTop: '4px' }}>${this.escapeHtml(String(value ?? ''))}</div>\n${pad}  ${trend ? `<div style={{ fontSize: '12px', color: '${String(trend).startsWith('-') ? '#ef4444' : '#22c55e'}' }}>${this.escapeHtml(String(trend))}</div>` : ''}\n${pad}</div>`
+      }
+
+      case 'Chart': {
+        const chartType = node.props.type || 'bar'
+        const dataSource = node.props.dataSource
+        const title = node.props.title
+        const titleJsx = title ? `${pad}  <h3 style={{ marginBottom: '12px' }}>${this.escapeHtml(String(title))}</h3>\n` : ''
+        // 简单图表渲染：柱状图/折线图用 CSS 条形/折线，饼图用分段条形
+        const stateName = dataSource ? `${this.toCamelCase(String(dataSource))}Data` : ''
+        if (chartType === 'pie') {
+          return `${titleJsx}${pad}<div style={{ display: 'flex', alignItems: 'center', gap: '16px' }}>\n${pad}  <div style={{ flex: 1, display: 'flex', height: '20px', borderRadius: '10px', overflow: 'hidden' }}>\n${pad}    {(${stateName} || []).slice(0, 6).map((rec, i) => (\n${pad}      <div key={i} style={{ flex: 1, background: ['#1677ff', '#52c41a', '#fa8c16', '#f5222d', '#722ed1', '#13c2c2'][i % 6] }} />\n${pad}    ))}\n${pad}  </div>\n${pad}</div>`
+        }
+        const barHeight = node.props.height || '300px'
+        return `${titleJsx}${pad}<div style={{ display: 'flex', alignItems: 'flex-end', gap: '8px', height: ${this.jsStr(barHeight)}, padding: '12px', background: '#fafafa', borderRadius: '8px' }}>\n${pad}  {(${stateName} || []).slice(0, 12).map((rec, i) => (\n${pad}    <div key={i} style={{ flex: 1, background: '#1677ff', borderRadius: '4px 4px 0 0', minHeight: '4px', height: \`calc(\${(rec.data ? Object.values(rec.data)[0] : i + 1) || 1}px * ${Math.max(1, 300 / (1000))})\`, maxHeight: '100%' }} />\n${pad}  ))}\n${pad}</div>`
+      }
+
+      case 'Login': {
+        const title = node.props.title || '欢迎登录'
+        const submitText = node.props.submitText || '登录'
+        const usernameLabel = node.props.usernameLabel || '用户名'
+        const passwordLabel = node.props.passwordLabel || '密码'
+        return `${pad}<div style={{ maxWidth: '360px', margin: '0 auto', padding: '48px 24px', textAlign: 'center' }}>\n${pad}  <h1 style={{ marginBottom: '32px' }}>${this.escapeHtml(String(title))}</h1>\n${pad}  <form onSubmit={(e) => { e.preventDefault(); window.alert('登录成功'); }} style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>\n${pad}    <div style={{ textAlign: 'left' }}>\n${pad}      <label style={{ display: 'block', marginBottom: '6px' }}>${this.escapeHtml(String(usernameLabel))}</label>\n${pad}      <input type="text" placeholder="请输入用户名" style={{ width: '100%', padding: '10px 12px', border: '1px solid #d9d9d9', borderRadius: '6px' }} />\n${pad}    </div>\n${pad}    <div style={{ textAlign: 'left' }}>\n${pad}      <label style={{ display: 'block', marginBottom: '6px' }}>${this.escapeHtml(String(passwordLabel))}</label>\n${pad}      <input type="password" placeholder="请输入密码" style={{ width: '100%', padding: '10px 12px', border: '1px solid #d9d9d9', borderRadius: '6px' }} />\n${pad}    </div>\n${pad}    <button type="submit" className="btn btn-primary btn-medium" style={{ width: '100%' }}>${this.escapeHtml(String(submitText))}</button>\n${pad}  </form>\n${pad}</div>`
+      }
 
       default:
         return `${pad}<div>{/* 未知组件: ${node.type} */}</div>`
