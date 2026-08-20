@@ -37,6 +37,12 @@ export interface Page {
   layout: PageLayout
   /** 页面内的组件树 */
   components: ComponentNode[]
+  /** 页面类型（从 Blueprint 透传，用于 Builder 生成正确的列表/新增/详情链接） */
+  pageType?: 'home' | 'list' | 'detail' | 'form' | 'dashboard' | 'login' | 'custom'
+  /** 页面绑定的数据表 ID（列表/详情/新增页关联的数据源） */
+  tableId?: string
+  /** 页面描述（从 Blueprint 透传） */
+  description?: string
 }
 
 /** 路由映射 */

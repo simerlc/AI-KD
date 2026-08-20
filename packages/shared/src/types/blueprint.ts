@@ -160,6 +160,23 @@ export interface BlueprintUserFlow {
 // ─── Blueprint 顶层 ─────────────────────────────────────
 
 /**
+ * 产品规划信息：由 Product Planning Agent 产出，在 Blueprint 之前。
+ * 描述应用的目标用户、核心功能、进阶功能，禁止直接进入代码生成。
+ */
+export interface ProductPlan {
+  /** 目标用户群体 */
+  targetUsers: string[]
+  /** 核心功能（MVP 必须有） */
+  coreFeatures: string[]
+  /** 进阶功能（增强阶段可补充） */
+  advancedFeatures: string[]
+  /** 推荐的应用模式（Pattern Library） */
+  pattern?: string
+  /** 产品价值主张 */
+  valueProposition?: string
+}
+
+/**
  * Application Blueprint：AI快搭 应用蓝图的完整定义。
  * CodingAgent 只允许读取校验通过（validateBlueprint）的合法 Blueprint。
  */
@@ -170,6 +187,8 @@ export interface Blueprint {
   appName: string
   /** 应用类型 */
   appType: 'web' | 'h5' | 'static'
+  /** 产品规划信息（Product Planning Agent 产出，可空以兼容旧数据） */
+  productPlan?: ProductPlan
   /** 页面列表 */
   pages: BlueprintPage[]
   /** 页面组件（每页组件树） */

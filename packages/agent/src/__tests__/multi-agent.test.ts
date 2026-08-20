@@ -198,8 +198,10 @@ describe('MultiAgentOrchestrator', () => {
 
     const { llm } = makeMockLLM()
     const orchestrator = new MultiAgentOrchestrator(llm)
-    expect(orchestrator.getManager().listRoles().length).toBe(5)
+    expect(orchestrator.getManager().listRoles().length).toBe(7)
     expect(orchestrator.getManager().get('coding')).toBeDefined()
     expect(orchestrator.getManager().get('fix')).toBeDefined()
+    expect(orchestrator.getManager().get('product-planning')).toBeDefined()
+    expect(orchestrator.getManager().get('enhancement')).toBeDefined()
   })
 })

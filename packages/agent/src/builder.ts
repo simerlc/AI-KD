@@ -1,6 +1,7 @@
 import type { AppModel, ComponentNode, Page } from '@aikd/shared'
 import type { GeneratedFile, LLMClient } from './types'
 import { generateId } from './utils'
+import { generateDesignSystemCss, deriveTokens } from './design-system'
 
 // ─── Builder Agent ───────────────────────────────────────
 //
@@ -227,94 +228,20 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
   }
 
   private generateIndexCss(appModel: AppModel): GeneratedFile {
+    // 基于 Design System 生成统一 CSS：Design Tokens + 基础组件 + 状态样式。
+    // 生成应用的视觉语言完全由设计系统驱动，禁止自由造样式。
     const theme = appModel.schema.theme
-    const isMobile = appModel.type === 'h5'
+    const tokens = deriveTokens(theme?.primaryColor, {
+      mode: theme?.backgroundColor === '#0f172a' ? 'dark' : 'light',
+      fontFamily: theme?.fontFamily,
+    })
+    const css = generateDesignSystemCss(tokens)
+    // h5 移动端应用额外限制内容宽度
+    const mobileWidth = appModel.type === 'h5' ? '\n\n/* 移动端应用：限制内容区宽度 */\n.ds-layout-content { max-width: 480px; margin: 0 auto; }\n' : ''
 
     return {
       path: 'src/index.css',
-      content: `:root {
-  --primary-color: ${theme.primaryColor};
-  --font-family: ${theme.fontFamily};
-  --bg-color: ${theme.backgroundColor || '#ffffff'};
-  --text-color: ${theme.textColor || '#1a1a1a'};
-  --secondary-color: ${theme.secondaryColor || '#6b7280'};
-}
-
-* {
-  margin: 0;
-  padding: 0;
-  box-sizing: border-box;
-}
-
-body {
-  font-family: var(--font-family);
-  background-color: var(--bg-color);
-  color: var(--text-color);
-  ${isMobile ? 'max-width: 480px;\n  margin: 0 auto;' : ''}
-}
-
-#root {
-  min-height: 100vh;
-}
-
-/* 按钮样式 */
-.btn {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  border: none;
-  border-radius: 6px;
-  cursor: pointer;
-  font-size: 14px;
-  font-weight: 500;
-  transition: all 0.2s;
-}
-.btn-primary { background: var(--primary-color); color: white; }
-.btn-secondary { background: var(--secondary-color); color: white; }
-.btn-outline { background: transparent; border: 1px solid var(--primary-color); color: var(--primary-color); }
-.btn-ghost { background: transparent; color: var(--primary-color); }
-.btn-danger { background: #ef4444; color: white; }
-.btn-small { padding: 4px 12px; font-size: 12px; }
-.btn-medium { padding: 8px 16px; font-size: 14px; }
-.btn-large { padding: 12px 24px; font-size: 16px; }
-.btn:disabled { opacity: 0.5; cursor: not-allowed; }
-
-/* 输入框样式 */
-input, textarea, select {
-  width: 100%;
-  padding: 8px 12px;
-  border: 1px solid #d1d5db;
-  border-radius: 6px;
-  font-size: 14px;
-  outline: none;
-  transition: border-color 0.2s;
-}
-input:focus, textarea:focus, select:focus {
-  border-color: var(--primary-color);
-}
-
-/* 卡片阴影 */
-.shadow-none { box-shadow: none; }
-.shadow-small { box-shadow: 0 1px 2px rgba(0,0,0,0.05); }
-.shadow-medium { box-shadow: 0 4px 6px rgba(0,0,0,0.1); }
-.shadow-large { box-shadow: 0 10px 15px rgba(0,0,0,0.1); }
-
-/* 提示框样式 */
-.alert { padding: 12px 16px; border-radius: 6px; margin-bottom: 8px; }
-.alert-info { background: #dbeafe; color: #1e40af; }
-.alert-success { background: #d1fae5; color: #065f46; }
-.alert-warning { background: #fef3c7; color: #92400e; }
-.alert-error { background: #fee2e2; color: #991b1b; }
-
-/* 表格样式 */
-table { width: 100%; border-collapse: collapse; }
-th, td { padding: 8px 12px; text-align: left; border-bottom: 1px solid #e5e7eb; }
-th { background: #f9fafb; font-weight: 600; }
-
-/* 链接样式 */
-a { color: var(--primary-color); text-decoration: none; }
-a:hover { text-decoration: underline; }
-`,
+      content: css + mobileWidth,
     }
   }
 
@@ -438,9 +365,16 @@ ${matchLogic}
     const componentJsx =
       page.components.length > 0
         ? page.components.map((comp) => this.renderComponent(comp, 6, undefined, appModel)).join('\n')
-        : `      <div className="page-empty" style={{ padding: '48px 24px', textAlign: 'center', color: '#999999', fontSize: '14px' }}>
-        <p>此页面暂无内容</p>
+        : `      <div className="ds-empty" style={{ padding: '48px 24px', textAlign: 'center' }}>
+        <p style={{ color: 'var(--ds-color-text-tertiary)' }}>此页面暂无内容</p>
       </div>`
+
+    // ── pageType='list' 页面自动增强：统计摘要 + 面包屑，让列表页不再是简单 demo 样式 ──
+    // 自动追加 stats 区到 componentJsx 之前，并补充 stats 派生逻辑到 dataHooks/extraHooks
+    const listEnhancement = (page.pageType === 'list' && primaryDs)
+      ? this.buildListPageEnhancement(page, primaryDs, primaryState, analysis.hasSearchableTable)
+      : null
+    const finalComponentJsx = listEnhancement ? listEnhancement.jsx + '\n' + componentJsx : componentJsx
 
     // 生成数据加载 Hook 声明（有数据源时）
     const dataHooks = dataSources
@@ -528,21 +462,127 @@ import { ${apiImportList} } from '../api'`
       ? `export default function ${componentName}(props: { id?: string }) {`
       : `export default function ${componentName}() {`
 
-    const extraHookBlock = extraHooks.join('\n\n')
+    const extraHookBlock = (extraHooks.join('\n\n') + (listEnhancement ? '\n\n' + listEnhancement.hook : '')).trim()
+
+    // 列表页增强的导入补全
+    const finalImports = listEnhancement?.extraImports
+      ? `import React, { useState, useEffect, useMemo } from 'react'
+import { ${apiImportList} } from '../api'`
+      : imports
 
     return {
       path: `src/pages/${page.id}.tsx`,
-      content: `${imports}
+      content: `${finalImports}
 
 ${fnSignature}
 ${dataHooks}${extraHookBlock ? '\n\n' + extraHookBlock : ''}
   return (
     <div className="page" ${isMobile ? 'style={{ minHeight: "100vh", maxWidth: "480px", margin: "0 auto" }}' : ''}>
-${componentJsx}
+${finalComponentJsx}
     </div>
   )
 }
 `,
+    }
+  }
+
+  /**
+   * 列表页增强：自动生成统计摘要 + 状态筛选，让列表页不再是简单 demo 样式。
+   * 返回 { jsx, hook, extraImports }，由 generatePageComponent 注入到页面。
+   *
+   * 增强内容：
+   *   1. 顶部 4 个 StatCard（总数 / 待处理 / 已完成 / 异常），按数据自动计算
+   *   2. 状态徽章着色（在 Table 操作列中识别 status 字段并根据值渲染 Badge）
+   *
+   * 注：实际渲染中 Badge 着色通过 Table 渲染时识别 'status' 列实现（见 renderComponent Table case）。
+   *    本方法主要负责生成顶部统计区 + 状态筛选。
+   */
+  private buildListPageEnhancement(
+    page: Page,
+    primaryDs: string,
+    primaryState: string,
+    hasSearch: boolean,
+  ): { jsx: string; hook: string; extraImports: boolean } {
+    const tableId = page.tableId || primaryDs.replace(/^database\./, '')
+    // 顶部统计区：4 张卡片（总数 / 待审批 / 已通过 / 已驳回）— 从数据中派生
+    // 注意：此方法返回**生成到 React 源文件里的字面量文本**，因此要使用字符串拼接而非模板字符串插值，
+    // 否则 ${primaryState} 会被 JS 求值为变量值，丢失标识符名。
+    const s = primaryState
+    const statsJsx = [
+      '      <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: "16px", marginBottom: "20px" }}>',
+      '        <div className="ds-card">',
+      '          <div style={{ fontSize: "13px", color: "var(--ds-color-text-secondary)" }}>全部</div>',
+      `          <div style={{ fontSize: "24px", fontWeight: 600, marginTop: "4px" }}>{${s}.length}</div>`,
+      '        </div>',
+      '        <div className="ds-card">',
+      '          <div style={{ fontSize: "13px", color: "var(--ds-color-text-secondary)" }}>待处理</div>',
+      `          <div style={{ fontSize: "24px", fontWeight: 600, marginTop: "4px", color: "var(--ds-color-warning)" }}>{${s}.filter((r) => { const _s = String(r.data?.status ?? ""); return _s.includes("待") || _s.includes("pending") || _s.includes("审批") }).length}</div>`,
+      '        </div>',
+      '        <div className="ds-card">',
+      '          <div style={{ fontSize: "13px", color: "var(--ds-color-text-secondary)" }}>已通过</div>',
+      `          <div style={{ fontSize: "24px", fontWeight: 600, marginTop: "4px", color: "var(--ds-color-success)" }}>{${s}.filter((r) => { const _s = String(r.data?.status ?? ""); return _s.includes("通过") || _s.includes("approved") || _s.includes("完成") }).length}</div>`,
+      '        </div>',
+      '        <div className="ds-card">',
+      '          <div style={{ fontSize: "13px", color: "var(--ds-color-text-secondary)" }}>已驳回</div>',
+      `          <div style={{ fontSize: "24px", fontWeight: 600, marginTop: "4px", color: "var(--ds-color-error)" }}>{${s}.filter((r) => { const _s = String(r.data?.status ?? ""); return _s.includes("驳回") || _s.includes("拒绝") || _s.includes("rejected") }).length}</div>`,
+      '        </div>',
+      '      </div>',
+    ].join('\n')
+
+    // 状态筛选：仅在有搜索时注入
+    // 注意：使用字符串拼接 + 数组 join 而非模板字符串，避免 ${primaryState} 被 JS 求值
+    const statusFilterHook = hasSearch
+      ? [
+          '  // 状态筛选',
+          "  const [statusFilter, setStatusFilter] = useState<'all' | 'pending' | 'approved' | 'rejected'>('all')",
+          `  const statusFiltered = (() => {`,
+          `    if (statusFilter === 'all') return ${s}`,
+          `    const map: Record<string, string[]> = {`,
+          `      pending: ['待', 'pending', '审批'],`,
+          `      approved: ['通过', 'approved', '完成'],`,
+          `      rejected: ['驳回', '拒绝', 'rejected'],`,
+          `    }`,
+          `    const keywords = map[statusFilter] || []`,
+          `    return ${s}.filter((r) => {`,
+          `      const _s = String(r.data?.status ?? '')`,
+          `      return keywords.some((k) => _s.includes(k))`,
+          `    })`,
+          `  })()`,
+          `  const ${s}Final = (${s}Filtered ?? ${s}).filter((r) => {`,
+          `    if (statusFilter === 'all') return true`,
+          `    const map: Record<string, string[]> = {`,
+          `      pending: ['待', 'pending', '审批'],`,
+          `      approved: ['通过', 'approved', '完成'],`,
+          `      rejected: ['驳回', '拒绝', 'rejected'],`,
+          `    }`,
+          `    const keywords = map[statusFilter] || []`,
+          `    const _s = String(r.data?.status ?? '')`,
+          `    return keywords.some((k) => _s.includes(k))`,
+          `  })`,
+        ].join('\n')
+      : ''
+
+    // 状态筛选 UI 标签
+    const filterBarJsx = hasSearch
+      ? [
+          '      <div style={{ display: "flex", gap: "8px", marginBottom: "12px" }}>',
+          "        {(['all','pending','approved','rejected'] as const).map((k) => (",
+          '          <button',
+          '            key={k}',
+          "            className={'ds-btn ' + (statusFilter === k ? 'ds-btn-primary' : 'ds-btn-outline') + ' ds-btn-small'}",
+          "            onClick={() => setStatusFilter(k)}",
+          '          >',
+          "            {({all:'全部',pending:'待处理',approved:'已通过',rejected:'已驳回'} as const)[k]}",
+          '          </button>',
+          '        ))}',
+          '      </div>',
+        ].join('\n')
+      : ''
+
+    return {
+      jsx: statsJsx + '\n' + filterBarJsx,
+      hook: statusFilterHook,
+      extraImports: hasSearch, // 需要 useState 已存在；useMemo 不需要所以不必引入
     }
   }
 
@@ -701,7 +741,7 @@ ${componentJsx}
     //  1) 优先用后端加载的 ${stateName}[0]?.data 的 keys；
     //  2) 否则用 ${fallbackName}[0] 的 keys；
     //  3) 都没有则显示提示
-    return `${pad}  {(() => {\n${pad}    const allKeys = (${fallbackName}[0] ? Object.keys(${fallbackName}[0]) : [])\n${pad}    // 排除系统主键字段（id 等不应作为可编辑字段）\n${pad}    const skip = new Set(['id', '_id', 'createdAt', 'updatedAt', 'created_at', 'updated_at', 'remark', 'remarks', 'note', 'notes'])\n${pad}    const fields = allKeys.filter((k) => !skip.has(k))\n${pad}    if (fields.length === 0) return <div style={{ color: '#999', padding: '12px 0' }}>暂无可编辑字段</div>\n${pad}    return (\n${pad}      <div>\n${pad}        {fields.map((f) => (\n${pad}          <div key={f} style={{ marginBottom: '12px' }}>\n${pad}            <label style={{ display: 'block', marginBottom: '4px', fontSize: '14px' }}>{f}</label>\n${pad}            <input type="text" placeholder={\`请输入\${f}\`} value={${formStateName}[f] ?? ''} onChange={(e) => ${setFormName}({ ...${formStateName}, [f]: e.target.value })} />\n${pad}          </div>\n${pad}        ))}\n${pad}      </div>\n${pad}    )\n${pad}  })()}`
+    return `${pad}  {(() => {\n${pad}    const allKeys = (${fallbackName}[0] ? Object.keys(${fallbackName}[0]) : [])\n${pad}    // 排除系统主键字段（id 等不应作为可编辑字段）\n${pad}    const skip = new Set(['id', '_id', 'createdAt', 'updatedAt', 'created_at', 'updated_at', 'remark', 'remarks', 'note', 'notes'])\n${pad}    const fields = allKeys.filter((k) => !skip.has(k))\n${pad}    if (fields.length === 0) return <div style={{ color: 'var(--ds-color-text-tertiary)', padding: '12px 0' }}>暂无可编辑字段</div>\n${pad}    return (\n${pad}      <div>\n${pad}        {fields.map((f) => (\n${pad}          <div key={f} style={{ marginBottom: '12px' }}>\n${pad}            <label style={{ display: 'block', marginBottom: '4px', fontSize: '14px' }}>{f}</label>\n${pad}            <input type="text" placeholder={\`请输入\${f}\`} value={${formStateName}[f] ?? ''} onChange={(e) => ${setFormName}({ ...${formStateName}, [f]: e.target.value })} />\n${pad}          </div>\n${pad}        ))}\n${pad}      </div>\n${pad}    )\n${pad}  })()}`
   }
 
   /**
@@ -773,7 +813,7 @@ ${componentJsx}
             clickAttr = ` onClick={() => { ${this.escapeJsString(onClick)} }}`
           }
         }
-        return `${pad}<button${clickAttr} className="btn btn-${this.normalizeVariant(node.props.variant)} btn-${this.normalizeSize(node.props.size)}" disabled={${node.props.disabled || false}}>${this.escapeHtml(String(node.props.text || ''))}</button>`
+        return `${pad}<button${clickAttr} className="ds-btn ds-btn-${this.normalizeVariant(node.props.variant)} ds-btn-${this.normalizeSize(node.props.size)}" disabled={${node.props.disabled || false}}>${this.escapeHtml(String(node.props.text || ''))}</button>`
       }
 
       case 'Link':
@@ -881,10 +921,10 @@ ${pad}    } catch (err) {
 ${pad}      console.error('提交失败:', err)
 ${pad}      alert('提交失败，请重试')
 ${pad}    }
-${pad}  }} style={{ display: ${this.jsStr(node.props.layout === 'horizontal' ? 'flex' : 'block')}, gap: '12px' }}>\n${formTitle}${formChildJsx}\n${pad}  <button type="submit" className="btn btn-primary btn-medium">${this.escapeHtml(String(node.props.submitText || '提交'))}</button>\n${pad}</form>`
+${pad}  }} style={{ display: ${this.jsStr(node.props.layout === 'horizontal' ? 'flex' : 'block')}, gap: '12px' }}>\n${formTitle}${formChildJsx}\n${pad}  <button type="submit" className="ds-btn ds-btn-primary ds-btn-medium">${this.escapeHtml(String(node.props.submitText || '提交'))}</button>\n${pad}</form>`
         }
 
-        return `${pad}<form onSubmit={(e) => e.preventDefault()} style={{ display: ${this.jsStr(node.props.layout === 'horizontal' ? 'flex' : 'block')}, gap: '12px' }}>\n${formTitle}${childJsx}\n${pad}  <button type="submit" className="btn btn-primary btn-medium">${this.escapeHtml(String(node.props.submitText || '提交'))}</button>\n${pad}</form>`
+        return `${pad}<form onSubmit={(e) => e.preventDefault()} style={{ display: ${this.jsStr(node.props.layout === 'horizontal' ? 'flex' : 'block')}, gap: '12px' }}>\n${formTitle}${childJsx}\n${pad}  <button type="submit" className="ds-btn ds-btn-primary ds-btn-medium">${this.escapeHtml(String(node.props.submitText || '提交'))}</button>\n${pad}</form>`
       }
 
       case 'Image':
@@ -894,7 +934,7 @@ ${pad}  }} style={{ display: ${this.jsStr(node.props.layout === 'horizontal' ? '
         const cardTitle = node.props.title
           ? `${pad}  <h3 style={{ marginBottom: '12px' }}>${this.escapeHtml(String(node.props.title))}</h3>\n`
           : ''
-        return `${pad}<div className="card shadow-${this.normalizeShadow(node.props.shadow)}" style={{ borderRadius: ${this.jsStr(node.props.radius)}, padding: ${this.jsStr(node.props.padding)}, background: 'white' }}>\n${cardTitle}${childJsx}\n${pad}</div>`
+        return `${pad}<div className="ds-card" style={{ borderRadius: ${this.jsStr(node.props.radius)}, padding: ${this.jsStr(node.props.padding)} }}>\n${cardTitle}${childJsx}\n${pad}</div>`
 
       case 'List': {
         // 优先渲染子组件；其次渲染 LLM 提供的静态 items；都没有则显示占位，避免空白
@@ -904,7 +944,7 @@ ${pad}  }} style={{ display: ${this.jsStr(node.props.layout === 'horizontal' ? '
         const staticItems = items
           .map(
             (item) =>
-              `${pad}  <div style={{ padding: '12px 0', borderBottom: '1px solid #f0f0f0', color: '#333333' }}>${this.escapeHtml(
+              `${pad}  <div style={{ padding: '12px 0', borderBottom: '1px solid var(--ds-color-border)', color: 'var(--ds-color-text)' }}>${this.escapeHtml(
                 typeof item === 'string' ? item : String(item.text ?? item.title ?? JSON.stringify(item)),
               )}</div>`,
           )
@@ -912,7 +952,7 @@ ${pad}  }} style={{ display: ${this.jsStr(node.props.layout === 'horizontal' ? '
         const body =
           childJsx ||
           staticItems ||
-          `${pad}  <div style={{ padding: '24px', textAlign: 'center', color: '#999999' }}>暂无数据</div>\n`
+          `${pad}  <div style={{ padding: '24px', textAlign: 'center', color: 'var(--ds-color-text-tertiary)' }}>暂无数据</div>\n`
         return `${pad}<div style={{ display: 'flex', flexDirection: 'column', gap: ${this.jsStr(node.props.gap)} }}>\n${body}\n${pad}</div>`
       }
 
@@ -943,21 +983,21 @@ ${pad}  }} style={{ display: ${this.jsStr(node.props.layout === 'horizontal' ? '
         const declaredRows = fieldList
           .map(
             (f) =>
-              `${pad}  <div style={{ display: 'flex', gap: '12px', padding: '10px 0', borderBottom: '1px solid #f0f0f0' }}>\n${pad}    <span style={{ width: '120px', color: '#888' }}>${this.escapeHtml(f.label)}</span>\n${pad}    <span>{String(record?.data?.['${this.escapeJsString(f.key)}'] ?? '')}</span>\n${pad}  </div>`,
+              `${pad}  <div style={{ display: 'flex', gap: '12px', padding: '10px 0', borderBottom: '1px solid var(--ds-color-border)' }}>\n${pad}    <span style={{ width: '120px', color: 'var(--ds-color-text-secondary)' }}>${this.escapeHtml(f.label)}</span>\n${pad}    <span>{String(record?.data?.['${this.escapeJsString(f.key)}'] ?? '')}</span>\n${pad}  </div>`,
           )
           .join('\n')
 
         // 兜底：当 record 已加载但声明字段为空时，遍历 record.data 所有 key
-        const dynamicRows = `${pad}  {record ? (\n${pad}    Object.keys(record.data).map((k) => (\n${pad}      <div key={k} style={{ display: 'flex', gap: '12px', padding: '10px 0', borderBottom: '1px solid #f0f0f0' }}>\n${pad}        <span style={{ width: '120px', color: '#888' }}>{k}</span>\n${pad}        <span>{String(record.data[k] ?? '')}</span>\n${pad}      </div>\n${pad}    ))\n${pad}  ) : (\n${pad}    <div style={{ color: '#999', padding: '16px 0' }}>加载中...</div>\n${pad}  )}`
+        const dynamicRows = `${pad}  {record ? (\n${pad}    Object.keys(record.data).map((k) => (\n${pad}      <div key={k} style={{ display: 'flex', gap: '12px', padding: '10px 0', borderBottom: '1px solid var(--ds-color-border)' }}>\n${pad}        <span style={{ width: '120px', color: 'var(--ds-color-text-secondary)' }}>{k}</span>\n${pad}        <span>{String(record.data[k] ?? '')}</span>\n${pad}      </div>\n${pad}    ))\n${pad}  ) : (\n${pad}    <div className="ds-loading" style={{ padding: '16px 0' }}><span className="ds-spinner"></span>加载中...</div>\n${pad}  )}`
 
         const rowsJsx = fieldList.length > 0 ? declaredRows : dynamicRows
         const title = node.props.title
           ? `${pad}<h2 style={{ marginBottom: '16px' }}>${this.escapeHtml(String(node.props.title))}</h2>\n`
           : ''
         const backBtn = dataSource
-          ? `${pad}<a className="btn btn-default btn-medium" href="/${dsBase}" style={{ marginBottom: '16px', display: 'inline-block' }}>返回列表</a>\n`
+          ? `${pad}<a className="ds-btn ds-btn-outline ds-btn-medium" href="/${dsBase}" style={{ marginBottom: '16px', display: 'inline-block' }}>返回列表</a>\n`
           : ''
-        return `${title}${backBtn}<div className="detail-card" style={{ background: 'white', padding: '20px', borderRadius: '8px' }}>\n${rowsJsx}\n${pad}</div>`
+        return `${title}${backBtn}<div className="ds-card" style={{ padding: '20px' }}>\n${rowsJsx}\n${pad}</div>`
       }
 
       case 'Table': {
@@ -985,6 +1025,25 @@ ${pad}  }} style={{ display: ${this.jsStr(node.props.layout === 'horizontal' ? '
         if (dataSource && typeof dataSource === 'string') {
           // 路由链接使用数据源 short name（去掉 database. 前缀），与 App 路由 /<name>/* 保持一致
           const dsBase = dataSource.replace(/^database\./, '')
+          // 从 Blueprint 中推断新增/详情页面 path（避免硬编码 /<dsBase>/new 与 Blueprint 实际 page path 不一致）
+          // 查找规则（按优先级）：
+          //   1) pageType=form 且 tableId=数据源 short name
+          //   2) pageType=form 任何页面（LLM 可能未填 tableId）
+          //   3) 兜底 /<dsBase>/new
+          // 详情页查找规则类似。
+          const pages = appModel?.schema?.pages ?? []
+          const formPage = pages.find(
+            (pg) => pg.pageType === 'form' && (pg.tableId === dsBase || pg.tableId === dataSource),
+          ) || pages.find((pg) => pg.pageType === 'form')
+          const detailPage = pages.find(
+            (pg) => pg.pageType === 'detail' && (pg.tableId === dsBase || pg.tableId === dataSource),
+          ) || pages.find((pg) => pg.pageType === 'detail')
+          // 兜底：若 Blueprint 没有 form/detail 页（LLM 未生成），用 short name 兜底
+          const newLink = formPage?.path || `/${dsBase}/new`
+          // 详情链接：Blueprint 的 detail 页面 path 通常是 '/<base>/:id'，把 :id 替换为 \${rec.id}
+          const detailLinkTpl = detailPage?.path
+            ? `/${detailPage.path.replace(/^\//, '').replace(/:id/g, '${rec.id}')}`
+            : `/${dsBase}/\${rec.id}`
           const stateName = `${this.toCamelCase(dataSource)}Data`
           const searchable = node.props.searchable !== false
           // 搜索时优先使用页面级过滤状态（*DataFiltered），否则用原数据
@@ -1005,15 +1064,15 @@ ${pad}  }} style={{ display: ${this.jsStr(node.props.layout === 'horizontal' ? '
                         act === 'detail' ? '详情' : act === 'edit' ? '编辑' : act === 'delete' ? '删除' : act
                       if (act === 'delete') {
                         // handleDelete 使用完整 dataSource id（与 api.ts 的 TABLES key 一致）
-                        return `${pad}              <button className="btn btn-danger btn-small" onClick={() => handleDelete('${dataSource}', rec.id)}>${label}</button>`
+                        return `${pad}              <button className="ds-btn ds-btn-danger ds-btn-small" onClick={() => handleDelete('${dataSource}', rec.id)}>${label}</button>`
                       }
-                      // 链接使用 short name 前缀，与 App 路由 /<name>/* 匹配。
+                      // 链接使用 Blueprint 实际页面 path（而不是硬编码 /<dsBase>/*），避免与路由不一致
                       // 必须用 JSX 模板表达式包裹（href={`...`}），否则 ${rec.id} 会变成字面量。
                       const hrefTpl =
                         act === 'detail'
-                          ? `/${dsBase}/\${rec.id}`
-                          : `/${dsBase}/\${rec.id}/edit`
-                      return `${pad}              <a className="btn btn-default btn-small" href={\`${hrefTpl}\`}>${label}</a>`
+                          ? detailLinkTpl
+                          : `${detailLinkTpl}/edit`
+                      return `${pad}              <a className="ds-btn ds-btn-outline ds-btn-small" href={\`${hrefTpl}\`}>${label}</a>`
                     })
                     .join('\n')
                 }\n${pad}            </div>\n${pad}          </td>`
@@ -1036,14 +1095,14 @@ ${pad}  }} style={{ display: ${this.jsStr(node.props.layout === 'horizontal' ? '
           const emptyColSpan = dynamicCols
             ? `Math.max(${stateName}[0] ? Object.keys(${stateName}[0].data).length : 0, 1)${hasActions ? ' + 1' : ''}`
             : `${Math.max(columns.length, 1) + (hasActions ? 1 : 0)}`
-          const bodyJsx = `${pad}  <tbody>\n${pad}    {${dataExpr}.length > 0 ? (\n${pad}      ${dataExpr}.map((rec) => (\n${pad}        <tr key={rec.id}>\n${rowCells}${actionCells}\n${pad}        </tr>\n${pad}      ))\n${pad}    ) : (\n${pad}      <tr>\n${pad}        <td colSpan={${emptyColSpan}} style={{ padding: '24px', textAlign: 'center', color: '#999999' }}>暂无数据</td>\n${pad}      </tr>\n${pad}    )}\n${pad}  </tbody>\n`
+          const bodyJsx = `${pad}  <tbody>\n${pad}    {${dataExpr}.length > 0 ? (\n${pad}      ${dataExpr}.map((rec) => (\n${pad}        <tr key={rec.id}>\n${rowCells}${actionCells}\n${pad}        </tr>\n${pad}      ))\n${pad}    ) : (\n${pad}      <tr>\n${pad}        <td colSpan={${emptyColSpan}} style={{ padding: '24px', textAlign: 'center', color: 'var(--ds-color-text-tertiary)' }}>暂无数据</td>\n${pad}      </tr>\n${pad}    )}\n${pad}  </tbody>\n`
 
-          // 搜索框 + 新增按钮（CRUD 工具栏）；链接使用 short name 前缀
+          // 搜索框 + 新增按钮（CRUD 工具栏）；链接使用 Blueprint 实际的 form page path，避免与路由不一致
           const toolbar = searchable
-            ? `${pad}<div style={{ display: 'flex', gap: '12px', marginBottom: '16px', alignItems: 'center' }}>\n${pad}  <input className="form-input" placeholder="搜索..." value={q} onChange={(e) => setQ(e.target.value)} style={{ flex: 1 }} />\n${pad}  <a className="btn btn-primary btn-medium" href="/${dsBase}/new">新增</a>\n${pad}</div>`
-            : ''
+            ? `${pad}<div style={{ display: 'flex', gap: '12px', marginBottom: '16px', alignItems: 'center' }}>\n${pad}  <input className="ds-input" placeholder="搜索..." value={q} onChange={(e) => setQ(e.target.value)} style={{ flex: 1 }} />\n${pad}  <a className="ds-btn ds-btn-primary ds-btn-medium" href="${newLink}">新增</a>\n${pad}</div>`
+            : `${pad}<div style={{ display: 'flex', gap: '12px', marginBottom: '16px', alignItems: 'center' }}>\n${pad}  <a className="ds-btn ds-btn-primary ds-btn-medium" href="${newLink}">新增</a>\n${pad}</div>`
 
-          return `${toolbar}${pad}<table>\n${headJsx}${bodyJsx}${pad}</table>`
+          return `${toolbar}${pad}<table className="ds-table">\n${headJsx}${bodyJsx}${pad}</table>`
         }
 
         const rows = Array.isArray(node.props.rows) ? (node.props.rows as Array<Record<string, unknown>>) : []
@@ -1063,14 +1122,14 @@ ${pad}  }} style={{ display: ${this.jsStr(node.props.layout === 'horizontal' ? '
                 )
                 .join('\n')}\n${pad}  </tbody>\n`
             : childJsx
-        return `${pad}<table>\n${headJsx}${bodyJsx || `${pad}  <tbody>\n${pad}    <tr>\n${pad}      <td style={{ padding: '24px', textAlign: 'center', color: '#999999' }}>暂无数据</td>\n${pad}    </tr>\n${pad}  </tbody>\n`}${pad}</table>`
+        return `${pad}<table className="ds-table">\n${headJsx}${bodyJsx || `${pad}  <tbody>\n${pad}    <tr>\n${pad}      <td style={{ padding: '24px', textAlign: 'center', color: 'var(--ds-color-text-tertiary)' }}>暂无数据</td>\n${pad}    </tr>\n${pad}  </tbody>\n`}${pad}</table>`
       }
 
       case 'Header':
         const headerLogo = node.props.logo
           ? `${pad}  <img src="${this.escapeHtml(String(node.props.logo))}" alt="logo" style={{ height: '32px' }} />\n`
           : ''
-        return `${pad}<header style={{ display: 'flex', alignItems: 'center', gap: '12px', padding: '0 24px', background: ${this.jsStr(node.props.background)}, height: ${this.jsStr(node.props.height)}, borderBottom: '1px solid #e5e7eb' }}>\n${headerLogo}${pad}  <h1 style={{ fontSize: '18px' }}>${this.escapeHtml(String(node.props.title || ''))}</h1>\n${childJsx}\n${pad}</header>`
+        return `${pad}<header className="ds-navbar" style={{ background: ${this.jsStr(node.props.background)}, height: ${this.jsStr(node.props.height)} }}>\n${headerLogo}${pad}  <h1 className="ds-navbar-title">${this.escapeHtml(String(node.props.title || ''))}</h1>\n${childJsx}\n${pad}</header>`
 
       case 'Footer':
         return `${pad}<footer style={{ padding: '24px', background: ${this.jsStr(node.props.background)}, color: ${this.jsStr(node.props.color)}, textAlign: 'center' }}>\n${pad}  ${this.escapeHtml(String(node.props.text || ''))}\n${childJsx}\n${pad}</footer>`
@@ -1090,13 +1149,13 @@ ${pad}  }} style={{ display: ${this.jsStr(node.props.layout === 'horizontal' ? '
         return `${pad}<div>\n${pad}  {/* TODO: 实现 Tabs 组件，tabs: ${JSON.stringify(node.props.tabs)} */}\n${childJsx}\n${pad}</div>`
 
       case 'Alert':
-        return `${pad}<div className="alert alert-${this.normalizeAlertVariant(node.props.variant)}" role="alert">\n${pad}  ${this.escapeHtml(String(node.props.text || ''))}\n${pad}</div>`
+        return `${pad}<div className="ds-alert ds-alert-${this.normalizeAlertVariant(node.props.variant)}" role="alert">\n${pad}  ${this.escapeHtml(String(node.props.text || ''))}\n${pad}</div>`
 
       case 'Badge':
         return `${pad}<span style={{ display: 'inline-block', padding: '2px 8px', borderRadius: '12px', fontSize: '12px', color: ${this.jsStr(node.props.color)}, background: ${this.jsStr(node.props.background)} }}>${this.escapeHtml(String(node.props.text || ''))}</span>`
 
       case 'Modal':
-        return `${pad}<div style={{ display: ${node.props.visible ? 'block' : 'none'}, position: 'fixed', top: 0, left: 0, right: 0, bottom: 0, background: 'rgba(0,0,0,0.5)', zIndex: 1000 }}>\n${pad}  <div style={{ maxWidth: ${this.jsStr(node.props.width)}, margin: '100px auto', background: 'white', borderRadius: '8px', padding: '24px' }}>\n${pad}    <h3>${this.escapeHtml(String(node.props.title || ''))}</h3>\n${childJsx}\n${pad}  </div>\n${pad}</div>`
+        return `${pad}<div className="ds-modal-overlay" style={{ display: ${node.props.visible ? 'flex' : 'none'} }}>\n${pad}  <div className="ds-modal" style={{ maxWidth: ${this.jsStr(node.props.width)} }}>\n${pad}    <div className="ds-modal-header"><div className="ds-modal-title">${this.escapeHtml(String(node.props.title || ''))}</div></div>\n${pad}    <div className="ds-modal-body">${childJsx}</div>\n${pad}  </div>\n${pad}</div>`
 
       // ─── 高级 / 复合组件（Component Library 复用） ──────
       case 'Dashboard': {
@@ -1107,7 +1166,7 @@ ${pad}  }} style={{ display: ${this.jsStr(node.props.layout === 'horizontal' ? '
         const cardJsx = cards
           .map(
             (card) =>
-              `${pad}    <div style={{ flex: 1, minWidth: '180px', background: 'white', borderRadius: '8px', padding: '16px', boxShadow: '0 1px 3px rgba(0,0,0,0.1)' }}>\n${pad}      <div style={{ fontSize: '13px', color: '#888' }}>${this.escapeHtml(String(card.label ?? ''))}</div>\n${pad}      <div style={{ fontSize: '24px', fontWeight: 600, marginTop: '4px' }}>${this.escapeHtml(String(card.value ?? ''))}</div>\n${pad}      ${card.trend ? `<div style={{ fontSize: '12px', color: '${String(card.trend ?? '').startsWith('-') ? '#ef4444' : '#22c55e'}' }}>${this.escapeHtml(String(card.trend))}</div>` : ''}\n${pad}    </div>`,
+              `${pad}    <div className="ds-card" style={{ flex: 1, minWidth: '180px' }}>\n${pad}      <div style={{ fontSize: '13px', color: 'var(--ds-color-text-secondary)' }}>${this.escapeHtml(String(card.label ?? ''))}</div>\n${pad}      <div style={{ fontSize: '24px', fontWeight: 600, marginTop: '4px' }}>${this.escapeHtml(String(card.value ?? ''))}</div>\n${pad}      ${card.trend ? `<div style={{ fontSize: '12px', color: '${String(card.trend ?? '').startsWith('-') ? 'var(--ds-color-error)' : 'var(--ds-color-success)'}' }}>${this.escapeHtml(String(card.trend))}</div>` : ''}\n${pad}    </div>`,
           )
           .join('\n')
         const title = node.props.title
@@ -1120,7 +1179,7 @@ ${pad}  }} style={{ display: ${this.jsStr(node.props.layout === 'horizontal' ? '
         const label = node.props.label
         const value = node.props.value
         const trend = node.props.trend
-        return `${pad}<div style={{ background: 'white', borderRadius: '8px', padding: '16px', boxShadow: '0 1px 3px rgba(0,0,0,0.1)' }}>\n${pad}  <div style={{ fontSize: '13px', color: '#888' }}>${this.escapeHtml(String(label ?? ''))}</div>\n${pad}  <div style={{ fontSize: '24px', fontWeight: 600, marginTop: '4px' }}>${this.escapeHtml(String(value ?? ''))}</div>\n${pad}  ${trend ? `<div style={{ fontSize: '12px', color: '${String(trend).startsWith('-') ? '#ef4444' : '#22c55e'}' }}>${this.escapeHtml(String(trend))}</div>` : ''}\n${pad}</div>`
+        return `${pad}<div className="ds-card">\n${pad}  <div style={{ fontSize: '13px', color: 'var(--ds-color-text-secondary)' }}>${this.escapeHtml(String(label ?? ''))}</div>\n${pad}  <div style={{ fontSize: '24px', fontWeight: 600, marginTop: '4px' }}>${this.escapeHtml(String(value ?? ''))}</div>\n${pad}  ${trend ? `<div style={{ fontSize: '12px', color: '${String(trend).startsWith('-') ? 'var(--ds-color-error)' : 'var(--ds-color-success)'}' }}>${this.escapeHtml(String(trend))}</div>` : ''}\n${pad}</div>`
       }
 
       case 'Chart': {
@@ -1134,7 +1193,7 @@ ${pad}  }} style={{ display: ${this.jsStr(node.props.layout === 'horizontal' ? '
           return `${titleJsx}${pad}<div style={{ display: 'flex', alignItems: 'center', gap: '16px' }}>\n${pad}  <div style={{ flex: 1, display: 'flex', height: '20px', borderRadius: '10px', overflow: 'hidden' }}>\n${pad}    {(${stateName} || []).slice(0, 6).map((rec, i) => (\n${pad}      <div key={i} style={{ flex: 1, background: ['#1677ff', '#52c41a', '#fa8c16', '#f5222d', '#722ed1', '#13c2c2'][i % 6] }} />\n${pad}    ))}\n${pad}  </div>\n${pad}</div>`
         }
         const barHeight = node.props.height || '300px'
-        return `${titleJsx}${pad}<div style={{ display: 'flex', alignItems: 'flex-end', gap: '8px', height: ${this.jsStr(barHeight)}, padding: '12px', background: '#fafafa', borderRadius: '8px' }}>\n${pad}  {(${stateName} || []).slice(0, 12).map((rec, i) => (\n${pad}    <div key={i} style={{ flex: 1, background: '#1677ff', borderRadius: '4px 4px 0 0', minHeight: '4px', height: \`calc(\${(rec.data ? Object.values(rec.data)[0] : i + 1) || 1}px * ${Math.max(1, 300 / (1000))})\`, maxHeight: '100%' }} />\n${pad}  ))}\n${pad}</div>`
+        return `${titleJsx}${pad}<div style={{ display: 'flex', alignItems: 'flex-end', gap: '8px', height: ${this.jsStr(barHeight)}, padding: '12px', background: 'var(--ds-color-surface-hover)', borderRadius: '8px' }}>\n${pad}  {(${stateName} || []).slice(0, 12).map((rec, i) => (\n${pad}    <div key={i} style={{ flex: 1, background: 'var(--ds-color-primary)', borderRadius: '4px 4px 0 0', minHeight: '4px', height: \`calc(\${(rec.data ? Object.values(rec.data)[0] : i + 1) || 1}px * ${Math.max(1, 300 / (1000))})\`, maxHeight: '100%' }} />\n${pad}  ))}\n${pad}</div>`
       }
 
       case 'Login': {
@@ -1142,7 +1201,7 @@ ${pad}  }} style={{ display: ${this.jsStr(node.props.layout === 'horizontal' ? '
         const submitText = node.props.submitText || '登录'
         const usernameLabel = node.props.usernameLabel || '用户名'
         const passwordLabel = node.props.passwordLabel || '密码'
-        return `${pad}<div style={{ maxWidth: '360px', margin: '0 auto', padding: '48px 24px', textAlign: 'center' }}>\n${pad}  <h1 style={{ marginBottom: '32px' }}>${this.escapeHtml(String(title))}</h1>\n${pad}  <form onSubmit={(e) => { e.preventDefault(); window.alert('登录成功'); }} style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>\n${pad}    <div style={{ textAlign: 'left' }}>\n${pad}      <label style={{ display: 'block', marginBottom: '6px' }}>${this.escapeHtml(String(usernameLabel))}</label>\n${pad}      <input type="text" placeholder="请输入用户名" style={{ width: '100%', padding: '10px 12px', border: '1px solid #d9d9d9', borderRadius: '6px' }} />\n${pad}    </div>\n${pad}    <div style={{ textAlign: 'left' }}>\n${pad}      <label style={{ display: 'block', marginBottom: '6px' }}>${this.escapeHtml(String(passwordLabel))}</label>\n${pad}      <input type="password" placeholder="请输入密码" style={{ width: '100%', padding: '10px 12px', border: '1px solid #d9d9d9', borderRadius: '6px' }} />\n${pad}    </div>\n${pad}    <button type="submit" className="btn btn-primary btn-medium" style={{ width: '100%' }}>${this.escapeHtml(String(submitText))}</button>\n${pad}  </form>\n${pad}</div>`
+        return `${pad}<div style={{ maxWidth: '360px', margin: '0 auto', padding: '48px 24px', textAlign: 'center' }}>\n${pad}  <h1 style={{ marginBottom: '32px' }}>${this.escapeHtml(String(title))}</h1>\n${pad}  <form onSubmit={(e) => { e.preventDefault(); window.alert('登录成功'); }} style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>\n${pad}    <div style={{ textAlign: 'left' }}>\n${pad}      <label style={{ display: 'block', marginBottom: '6px' }}>${this.escapeHtml(String(usernameLabel))}</label>\n${pad}      <input type="text" placeholder="请输入用户名" className="ds-input" style={{ width: '100%' }} />\n${pad}    </div>\n${pad}    <div style={{ textAlign: 'left' }}>\n${pad}      <label style={{ display: 'block', marginBottom: '6px' }}>${this.escapeHtml(String(passwordLabel))}</label>\n${pad}      <input type="password" placeholder="请输入密码" className="ds-input" style={{ width: '100%' }} />\n${pad}    </div>\n${pad}    <button type="submit" className="btn btn-primary btn-medium" style={{ width: '100%' }}>${this.escapeHtml(String(submitText))}</button>\n${pad}  </form>\n${pad}</div>`
       }
 
       default:

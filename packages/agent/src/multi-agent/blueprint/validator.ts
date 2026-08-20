@@ -20,6 +20,60 @@ const VALID_API_METHODS = new Set(['GET', 'POST', 'PUT', 'PATCH', 'DELETE'])
 const VALID_FIELD_TYPES = new Set(['string', 'number', 'boolean', 'date', 'datetime', 'enum', 'uuid'])
 const VALID_CRUD = new Set(['list', 'get', 'create', 'update', 'delete'])
 
+/**
+ * 宽容归一化：真实 LLM 输出常使用与规范不一致的同义枚举值。
+ * 这里做「同义词 → 合法值」映射，避免因命名差异导致整个应用生成失败。
+ */
+
+/** crud 同义词 → 合法值（LLM 常见变体） */
+const CRUD_ALIASES: Record<string, string> = {
+  read: 'list',        // 读/列表
+  query: 'list',       // 查询
+  fetch: 'list',       // 获取列表
+  detail: 'get',       // 详情
+  find: 'get',         // 查找单个
+  view: 'get',         // 查看单个
+  insert: 'create',    // 插入
+  add: 'create',       // 新增
+  modify: 'update',    // 修改
+  edit: 'update',      // 编辑
+  remove: 'delete',    // 删除
+  del: 'delete',       // 删除缩写
+  destroy: 'delete',   // 删除
+  none: '',            // 无 CRUD（忽略该字段）
+}
+
+/** pageType 同义词 → 合法值（LLM 常见变体） */
+const PAGE_TYPE_ALIASES: Record<string, string> = {
+  cart: 'custom',      // 购物车 → 自定义页
+  checkout: 'custom',  // 结算 → 自定义页
+  profile: 'custom',   // 个人中心 → 自定义页
+  settings: 'custom',  // 设置 → 自定义页
+  index: 'home',       // 首页
+  landing: 'custom',   // 落地页
+  'list-page': 'list', // 列表
+  'detail-page': 'detail', // 详情
+  'form-page': 'form', // 表单
+}
+
+/** 归一化 crud 值；返回合法值或空串（表示应忽略） */
+export function normalizeCrud(value: unknown): string {
+  if (typeof value !== 'string') return ''
+  const v = value.toLowerCase().trim()
+  if (VALID_CRUD.has(v)) return v
+  if (v in CRUD_ALIASES) return CRUD_ALIASES[v]
+  return ''
+}
+
+/** 归一化 pageType 值；返回合法值或原值（若非法则返回空串） */
+export function normalizePageType(value: unknown): string {
+  if (typeof value !== 'string') return ''
+  const v = value.toLowerCase().trim()
+  if (VALID_PAGE_TYPES.has(v)) return v
+  if (v in PAGE_TYPE_ALIASES) return PAGE_TYPE_ALIASES[v]
+  return ''
+}
+
 export class BlueprintValidator {
   /**
    * 校验 Blueprint。
@@ -72,8 +126,14 @@ export class BlueprintValidator {
       if (page.layout && !VALID_LAYOUTS.has(String(page.layout))) {
         errors.push(`pages[${i}].layout 必须是 "web" | "mobile"`)
       }
-      if (page.pageType && !VALID_PAGE_TYPES.has(String(page.pageType))) {
-        errors.push(`pages[${i}].pageType "${page.pageType}" 无效`)
+      if (page.pageType !== undefined && page.pageType !== null) {
+        const normalized = normalizePageType(page.pageType)
+        if (!normalized) {
+          errors.push(`pages[${i}].pageType "${page.pageType}" 无效`)
+        } else if (normalized !== String(page.pageType)) {
+          // 就地归一化，让后续流程拿到合法值
+          page.pageType = normalized
+        }
       }
     })
 
@@ -152,8 +212,14 @@ export class BlueprintValidator {
         if (typeof e.description !== 'string' || !e.description) {
           errors.push(`apiDesign.endpoints[${i}].description 必须是字符串`)
         }
-        if (e.crud && !VALID_CRUD.has(String(e.crud))) {
-          errors.push(`apiDesign.endpoints[${i}].crud "${e.crud}" 无效`)
+        if (e.crud !== undefined && e.crud !== null && String(e.crud) !== '') {
+          const normalized = normalizeCrud(e.crud)
+          if (!normalized) {
+            errors.push(`apiDesign.endpoints[${i}].crud "${e.crud}" 无效`)
+          } else {
+            // 就地归一化，让后续流程拿到合法值
+            e.crud = normalized
+          }
         }
       })
     }

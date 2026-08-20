@@ -5,6 +5,7 @@
 
 import type { AppType } from '@aikd/shared'
 import { registry } from '@aikd/component-registry'
+import { componentsToPromptDescription, templatesToPromptDescription } from '../../design-system'
 
 // ─── Prompt 定义 ─────────────────────────────────────────
 
@@ -76,9 +77,29 @@ const BLUEPRINT_PROMPT: PromptDefinition = {
 - 前端框架：React 18 + TypeScript（函数组件 + Hooks，禁止 class 组件）
 - 构建工具：Vite 5
 - 路由：react-router-dom v6
-- 样式：内联样式或 CSS 文件，禁止引入 Tailwind/antd/MUI 等未声明的 UI 库
+- 样式：必须基于 AI快搭 Design System（Design Tokens + 基础组件），禁止引入 Tailwind/antd/MUI 等未声明的 UI 库
 - 数据访问：统一走 src/api.ts 封装的 /api/data 接口，禁止在页面里直连数据库或写死 fetch 地址
 - 禁止引入任何未在技术栈中声明的第三方依赖
+
+## Design System 强制规范（必须遵守）
+- 所有 UI 必须基于 Design System 开发，禁止自由生成 HTML/CSS
+- 所有颜色必须来自 Design Tokens（var(--ds-color-*)，如 --ds-color-primary / --ds-color-surface / --ds-color-border / --ds-color-text）
+- 所有间距使用 4px 栅格（var(--ds-space-*)，如 4/8/12/16/24/32/48）
+- 所有圆角使用规范（--ds-radius-small/medium/large/xl）
+- 所有阴影使用规范（--ds-shadow-card/modal/floating）
+- 优先复用 Design System 基础组件（Button/Card/Input/Select/Modal/Table/Form/Tabs/Dropdown/Badge/Avatar/Navbar/Sidebar/Layout），禁止为同一目的重复造组件
+- 优先组合页面模板（Dashboard/Admin/CRM/E-commerce/Landing），而非从零创建页面
+- 所有页面必须包含：Loading 状态、Empty 状态、Error 状态、Success 反馈
+- 所有按钮必须绑定真实逻辑，所有表单必须有校验，所有 API 必须处理异常
+- 所有页面必须支持移动端响应式
+
+## Design System 基础组件清单
+
+${componentsToPromptDescription()}
+
+## 页面模板系统（优先复用）
+
+${templatesToPromptDescription()}
 
 ## 结构完整性（硬性要求）
 1. 必须有且只有一个首页，其 path 为 "/"
@@ -159,6 +180,15 @@ const CODING_PROMPT: PromptDefinition = {
 5. Vite 5 构建；路由用 react-router-dom v6
 6. 只能使用 package.json 中已声明的依赖，禁止引入未声明的第三方库
 
+## Design System 强制规范（必须遵守）
+7. 所有 UI 必须使用 AI快搭 Design System（className 使用 ds-* 前缀：ds-btn / ds-card / ds-input / ds-table / ds-badge 等），禁止自由生成 HTML/CSS
+8. 所有颜色必须来自 Design Tokens（var(--ds-color-*)），禁止硬编码十六进制/rgb 颜色
+9. 所有间距/圆角/阴影使用 Design Token（var(--ds-space-*)、var(--ds-radius-*)、var(--ds-shadow-*)）
+10. 禁止重复创建基础 UI 组件；若 Design System 已提供等价组件（如 Button/Card/Table/Modal），必须复用，不得用原生 <button>/<table> 重新造
+11. 所有数据请求必须处理 loading / error 状态；列表必须处理 empty 空态
+12. 所有按钮必须绑定真实 onClick 逻辑；所有表单必须做校验；所有 API 调用必须 try/catch
+13. 所有页面必须支持移动端响应式（依赖 index.css 中已有的 @media 断点）
+
 ## 文件结构约束
 7. 必须生成完整工程文件，缺一不可：
    package.json / index.html / vite.config.ts / tsconfig.json / src/main.tsx / src/App.tsx / src/api.ts
@@ -207,6 +237,13 @@ const REVIEW_PROMPT: PromptDefinition = {
 5. 检查 package.json 是否包含 react / react-dom 依赖
 6. 检查代码文件基本语法（花括号平衡、字符串闭合）
 7. 输出结构化的错误/警告/建议清单，供 FixAgent 修复
+
+## 设计规范审查（必须检查）
+8. 检查是否基于 Design System（代码中是否使用 ds-* 组件类名），禁止自由生成 HTML/CSS
+9. 检查是否存在硬编码颜色（应使用 var(--ds-color-*)），硬编码颜色记为警告
+10. 检查是否重复造组件（存在大量未复用 Design System 的原生 <button>/<table> 记为警告）
+11. 检查是否缺少 Loading / Empty / Error 状态处理，缺失记为警告
+12. 检查是否缺少移动端响应式，缺失记为警告
 
 ## 可用组件
 

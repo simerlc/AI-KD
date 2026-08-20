@@ -13,13 +13,24 @@ import type { LLMClient } from '../types'
 import type { AppModel, AppType, Blueprint } from '@aikd/shared'
 import type { IntegrityReport } from './blueprint/integrity-checker'
 import type { ApplicationTestResult } from './tester/result'
+import type { DesignReviewReport } from '../design-system'
 
 // ─── Agent 身份 ──────────────────────────────────────────
 
-export type AgentRole = 'requirement' | 'blueprint' | 'coding' | 'review' | 'fix' | 'runtime' | 'tester'
+export type AgentRole =
+  | 'requirement'
+  | 'product-planning'
+  | 'blueprint'
+  | 'coding'
+  | 'review'
+  | 'fix'
+  | 'enhancement'
+  | 'quality-evaluation'
+  | 'runtime'
+  | 'tester'
 
 /** 所有 Agent 角色的列表 */
-export const AGENT_ROLES: AgentRole[] = ['requirement', 'blueprint', 'coding', 'review', 'fix', 'runtime']
+export const AGENT_ROLES: AgentRole[] = ['requirement', 'product-planning', 'blueprint', 'coding', 'review', 'fix', 'enhancement', 'quality-evaluation', 'runtime']
 
 // ─── Agent 消息协议（JSON 通信）──────────────────────────
 
@@ -63,6 +74,9 @@ export type AgentMessageType =
   | 'test.repair.start' // Tester → Orchestrator：开始自动修复
   | 'test.repair.done' // Tester → Orchestrator：修复完成
   | 'test.done' // Tester → Orchestrator：测试闭环结束（决定是否放行 Preview）
+  | 'product-planning.done' // Product Planning → Orchestrator：产品规划完成
+  | 'quality.done' // Quality Evaluation → Orchestrator：质量评分完成
+  | 'enhancement.done' // Enhancement → Orchestrator：增强完成
 
 /** 消息载荷（按消息类型区分） */
 export type AgentMessagePayload =
@@ -101,6 +115,12 @@ export interface RequirementAnalyzedPayload {
   blueprintChangeRequest?: string
   /** 多轮对话历史（修改模式上下文） */
   history?: Array<{ role: 'user' | 'assistant'; content: string }>
+  /** 已加载的技能上下文（Skill System 注入，供 BlueprintAgent 使用） */
+  skillContextText?: string
+  /** 产品规划信息（Product Planning Agent 产出，注入 Blueprint 生成） */
+  productPlan?: import('@aikd/shared').ProductPlan
+  /** 推荐的应用模式 ID（Pattern Library） */
+  patternId?: string
 }
 
 /** BlueprintAgent 输出：应用蓝图 */
@@ -302,6 +322,18 @@ export interface MultiAgentResult {
   repairRounds?: number
   /** 自动修复记录 */
   repairLog?: string[]
+  /** Design Review 报告（UI 自动审查结果） */
+  designReview?: DesignReviewReport
+  /** 本次加载的技能 ID 列表（Skill System） */
+  skills?: string[]
+  /** 产品规划信息（Product Planning Agent 产出） */
+  productPlan?: import('@aikd/shared').ProductPlan
+  /** 推荐的应用模式 ID */
+  patternId?: string
+  /** 质量评分报告（Application Quality Evaluation Agent 产出） */
+  qualityReport?: import('./agents/quality-evaluation').QualityEvaluationReport
+  /** 增强结果（Enhancement Agent 产出） */
+  enhancement?: { addedCapabilities: string[]; summary: string; enhanced: boolean }
 }
 
 /** 应用测试结果消息载荷（Tester → Orchestrator） */

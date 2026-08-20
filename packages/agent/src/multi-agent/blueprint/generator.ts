@@ -7,11 +7,12 @@
 //
 // 强制约束：本 Generator 只产出「合法 Blueprint」，绝不直接输出代码。
 
-import type { Blueprint, BlueprintValidationResult } from '@aikd/shared'
+import type { Blueprint, BlueprintValidationResult, ProductPlan } from '@aikd/shared'
 import type { LLMClient, LLMMessage } from '../../types'
 import { validateBlueprint } from './validator'
 import { extractJson } from '../../utils'
 import { registry } from '@aikd/component-registry'
+import { getPattern } from '../patterns'
 
 export interface BlueprintGeneratorOptions {
   /** 用户原始需求 */
@@ -35,6 +36,12 @@ export interface BlueprintGeneratorOptions {
   maxRetries?: number
   /** 中止信号 */
   signal?: AbortSignal
+  /** 已加载的技能上下文（Skill Context Loader 产出，注入生成规则） */
+  skillContextText?: string
+  /** 产品规划信息（Product Planning Agent 产出，指导产出更完整的产品化蓝图） */
+  productPlan?: ProductPlan
+  /** 推荐的应用模式 ID */
+  patternId?: string
 }
 
 export interface BlueprintGeneratorResult {
@@ -77,6 +84,14 @@ ${registry.toPromptDescription()}
 7. 页面绑定的 tableId 必须存在于 dataModel.tables
 8. appType 为 "web" | "h5" | "static"
 9. 修改模式（已有 Blueprint）：保持已有 pages/id 稳定，只修改用户明确要求的部分
+
+## 枚举值约束（必须严格使用以下合法值）
+- **pageType 只能是**："home" | "list" | "detail" | "form" | "dashboard" | "login" | "custom"
+  （购物车/结算/设置等非标准页一律用 "custom"，禁止使用 "cart"/"checkout" 等）
+- **crud 只能是**："list" | "get" | "create" | "update" | "delete"
+  （查询列表用 "list"，查询单条用 "get"，禁止使用 "read"/"detail"/"query" 等）
+- **apiDesign 的 method 只能是**："GET" | "POST" | "PUT" | "PATCH" | "DELETE"
+- **字段 type 只能是**："string" | "number" | "boolean" | "date" | "datetime" | "enum" | "uuid"
 
 ## 输出格式
 请直接输出 Blueprint JSON（不要包含代码块之外的说明文字）。结构：
@@ -182,6 +197,39 @@ export class BlueprintGenerator {
     }
 
     body += `\n## 用户原始需求\n\n${options.prompt}\n\n`
+
+    // 注入产品规划信息（Product Planning Agent 产出）
+    if (options.productPlan) {
+      body += `## 产品规划（必须遵守，产出完整产品化的蓝图）\n\n`
+      body += `- 目标用户：${options.productPlan.targetUsers.join('、')}\n`
+      body += `- 核心功能：${options.productPlan.coreFeatures.join('、')}\n`
+      if (options.productPlan.advancedFeatures.length > 0) {
+        body += `- 进阶功能：${options.productPlan.advancedFeatures.join('、')}\n`
+      }
+      if (options.productPlan.valueProposition) {
+        body += `- 价值主张：${options.productPlan.valueProposition}\n`
+      }
+      body += `\n要求：核心功能必须有对应的页面、数据模型与 API 支撑，禁止停留在简单 CRUD。\n\n`
+    }
+
+    // 注入应用模式库（Pattern Library）
+    if (options.patternId) {
+      const pattern = getPattern(options.patternId)
+      if (pattern) {
+        body += `## 推荐应用模式（${pattern.name}）\n\n`
+        body += `请参考此模式的页面结构、功能模块与数据模型，优先组合该模式：\n\n`
+        body += `- 页面结构：${pattern.pages.map((p) => p.title).join('、')}\n`
+        body += `- 功能模块：${pattern.modules.join('、')}\n`
+        body += `- 数据模型：${pattern.dataModels.map((d) => d.name).join('、')}\n`
+        body += `- 推荐组件：${pattern.components.join('、')}\n`
+        body += `- 用户流程：${pattern.userFlows.join('；')}\n\n`
+      }
+    }
+
+    // 注入已加载的专业技能上下文（Skill System）
+    if (options.skillContextText) {
+      body += `${options.skillContextText}\n\n`
+    }
 
     // 基于需求做组件推荐（组件选择能力）
     body += `## 组件推荐（请优先复用这些组件）\n\n${this.recommendComponents(options.requirement)}\n\n`

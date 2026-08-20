@@ -53,6 +53,9 @@ export class BlueprintAgent implements Agent<BlueprintProducedPayload> {
       existingBlueprint: input.existingBlueprint,
       changeRequest: input.blueprintChangeRequest,
       signal: ctx.signal,
+      skillContextText: input.skillContextText,
+      productPlan: input.productPlan,
+      patternId: input.patternId,
     })
 
     // 二次校验，确保返回的 Blueprint 一定是合法的

@@ -1,7 +1,10 @@
 // ─── Agents 统一导出 ──────────────────────────────────────
 export * from './requirement'
+export * from './product-planning'
 export * from './blueprint'
 export * from './coding'
 export * from './review'
 export * from './fix'
+export * from './enhancement'
+export * from './quality-evaluation'
 export * from './runtime'

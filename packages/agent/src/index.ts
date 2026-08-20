@@ -2,6 +2,10 @@
 // + Multi-Agent 架构（Requirement/Blueprint/Coding/Review/Fix）
 // + Runtime Agent（Tool Calling：filesystem/terminal/browser）
 // + Auto-Debug（Generate → Run → Review → Fix → Run Again）
+// + AI Native Design System（Design Tokens / 组件库 / 模板 / Design Review）
+// + AI Skill System（技能注册 / 技能选择 / 上下文加载 / 反馈进化）
+export * from './design-system'
+export * from './skills'
 export * from './multi-agent'
 export * from './runtime-agent'
 export * from './auto-debug'

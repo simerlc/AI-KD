@@ -26,6 +26,10 @@ export function blueprintToAppModel(blueprint: Blueprint, appId?: string): AppMo
       title: p.title,
       layout: p.layout,
       components,
+      // 透传 Blueprint 的元信息，Builder 需要它们来生成正确的列表/新增/详情链接
+      pageType: p.pageType,
+      tableId: p.tableId,
+      description: p.description,
     }
   })
 
