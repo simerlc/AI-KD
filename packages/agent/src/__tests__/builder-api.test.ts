@@ -91,9 +91,10 @@ describe('BuilderAgent - 数据访问层生成', () => {
     model.schema.dataSources = []
     const { files } = await builder.build({ appModel: model })
 
-    // 无数据源时不生成 api.ts（保持向后兼容）
+    // 无数据源时也应生成 api.ts：页面组件可能引用 '../api'，基础文件应始终存在
     const apiFile = files.find((f) => f.path === 'src/api.ts')
-    expect(apiFile).toBeUndefined()
+    expect(apiFile).toBeDefined()
+    expect(apiFile!.content).toContain('export async function listRecords')
   })
 
   it('传入 appId 时 tableId 应与后端建表主键一致（appId:name）', async () => {

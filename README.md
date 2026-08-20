@@ -1,8 +1,8 @@
 # AI快搭 (AIKD)
 
-> 通过自然语言生成 App Model → 由 Agent 生成 React 应用，并支持本地沙箱预览与版本管理。
+> 通过自然语言生成 App Model / Blueprint → Multi-Agent 生成 React 应用，自动测试与修复后支持本地沙箱预览与版本管理。
 
-AI快搭（AIKD）是一个基于 TypeScript 的 pnpm monorepo 低代码搭建平台。用户输入自然语言需求，系统经 Planner 生成 **App Model**（JSON Schema 低代码模型），再由 Builder 生成可运行的 React + Vite 工程，经本地沙箱实时预览，并由 Tester 校验与自动修复。
+AI快搭（AIKD）是一个基于 TypeScript 的 pnpm monorepo 低代码搭建平台。用户输入自然语言需求，系统经 **Multi-Agent 编排**（需求分析 → Blueprint → 代码生成）产出 React + Vite 应用，生成后自动执行**全功能测试与自动修复闭环**（五大维度校验，未达标准自动修复并重测，最多 5 轮），通过后再进入本地沙箱实时预览。
 
 ## 文档
 
@@ -29,7 +29,7 @@ AIKD-V1/
     ├── shared/            # @aikd/shared 共享类型与协议定义
     ├── app-engine/        # @aikd/app-engine App Model schema / 校验 / 版本 / 模板
     ├── component-registry/# @aikd/component-registry 内置组件 + props schema
-    └── agent/             # @aikd/agent  Planner / Builder / Tester / Orchestrator
+    └── agent/             # @aikd/agent  Multi-Agent 编排 + 应用自动测试与修复 + Runtime/自愈
 ```
 
 各包详细职责与目录树见 [DEVELOPER.md · 仓库结构](DEVELOPER.md#仓库结构)。
@@ -110,6 +110,7 @@ pnpm build        # 构建全部包（web + server）
 pnpm start        # 启动 server（使用构建产物）
 pnpm type-check   # 类型检查
 pnpm lint         # ESLint
+pnpm --filter @aikd/agent test   # agent 单元测试（生成/测试闭环/修复等）
 pnpm db:studio    # 打开 drizzle-studio 查看数据库
 ```
 

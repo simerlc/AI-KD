@@ -1,15 +1,16 @@
 /**
- * 测试脚本：验证 Builder 代码生成 + LocalNodeSandbox 实时预览
+ * 测试脚本：验证 Builder 代码生成 + 沙箱实时预览（node / docker 模式）
  *
  * 不依赖 LLM API Key，直接构造 App Model + 确定性代码生成。
  * 生成一个"待办事项"应用作为测试用例。
  *
  * 运行方式（在 packages/server 目录下）：
- *   $env:SANDBOX_MODE='node'; $env:WORKSPACE_ROOT='../../workspaces'; pnpm exec tsx scripts/test-preview.ts
+ *   $env:SANDBOX_MODE='docker'; pnpm exec tsx scripts/test-preview.ts
+ *   $env:SANDBOX_MODE='node';   pnpm exec tsx scripts/test-preview.ts
  */
 import { BuilderAgent } from '@aikd/agent'
 import type { LLMClient, AppModel } from '@aikd/agent'
-import { LocalNodeSandbox } from '../src/sandbox/local-node-sandbox.js'
+import { getSandbox } from '../src/sandbox/index.js'
 import { writeWorkspaceFiles, getWorkspacePath } from '../src/lib/workspace.js'
 import http from 'node:http'
 import fs from 'node:fs/promises'
@@ -408,9 +409,11 @@ async function main() {
   }
 
   // 4. 启动沙箱
-  console.log('\n[4/5] 启动 LocalNodeSandbox...')
+  const sandbox = getSandbox()
+  const mode = process.env.SANDBOX_MODE || 'docker'
+  console.log(`\n[4/5] 启动沙箱 (${mode})...`)
   console.log('      (npm install + vite dev server，预计 30-60 秒)')
-  const sandbox = new LocalNodeSandbox()
+  await sandbox.ensureImage()
   const startTime = Date.now()
   const instance = await sandbox.create({ appId })
   const elapsed = ((Date.now() - startTime) / 1000).toFixed(1)

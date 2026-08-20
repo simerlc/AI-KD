@@ -2,10 +2,45 @@ import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 import path from 'node:path'
 import http from 'node:http'
+import { existsSync } from 'node:fs'
 import { getPortAllocator } from './port-allocator.js'
 import { getWorkspacePath } from '../lib/workspace.js'
 
 const execFileAsync = promisify(execFile)
+
+// ─── docker CLI 路径解析 ────────────────────────────────
+//
+// 进程 PATH 可能不包含 docker（例如 Docker Desktop 安装于服务启动之后，
+// 或 IDE/终端在安装前已启动）。此时从常见安装路径兜底解析。
+// 优先级：环境变量 DOCKER_BIN > PATH（execFile 默认）> 常见安装路径。
+
+const DOCKER_FALLBACK_PATHS: string[] =
+  process.platform === 'win32'
+    ? [
+        'C:\\Program Files\\Docker\\Docker\\resources\\bin\\docker.exe',
+        'C:\\Program Files\\Docker\\Docker\\resources\\bin\\docker',
+      ]
+    : ['/Applications/Docker.app/Contents/Resources/bin/docker']
+
+let _dockerBin: string | null = null
+
+function resolveDockerBin(): string {
+  if (_dockerBin) return _dockerBin
+  const explicit = process.env.DOCKER_BIN
+  if (explicit) {
+    _dockerBin = explicit
+    return _dockerBin
+  }
+  for (const p of DOCKER_FALLBACK_PATHS) {
+    if (existsSync(p)) {
+      _dockerBin = p
+      return _dockerBin
+    }
+  }
+  // 最后回退到 PATH 查找（保持原有错误信息）
+  _dockerBin = 'docker'
+  return _dockerBin
+}
 
 // ─── Local Docker Sandbox ──────────────────────────────
 //
@@ -89,6 +124,11 @@ export class LocalDockerSandbox {
       `VITE_API_TARGET=${apiTarget}`,
       '-v',
       `${absWorkspace}:/app`,
+      // 用匿名卷隔离 node_modules：主机上若已有 Windows 平台安装的 node_modules
+      // （.bin 脚本指向 node.exe），会污染容器导致 "node.exe: not found"。
+      // 匿名卷让容器内独立安装 Linux 版依赖，与主机互不干扰。
+      '-v',
+      '/app/node_modules',
       '-w',
       '/app',
       this.image,
@@ -96,7 +136,7 @@ export class LocalDockerSandbox {
 
     let containerId: string
     try {
-      const { stdout } = await execFileAsync('docker', args, {
+      const { stdout } = await execFileAsync(resolveDockerBin(), args, {
         windowsHide: true,
         timeout: 30_000,
       })
@@ -148,7 +188,7 @@ export class LocalDockerSandbox {
     if (!instance || instance.status !== 'running') return
 
     try {
-      await execFileAsync('docker', ['stop', instance.containerName], {
+      await execFileAsync(resolveDockerBin(), ['stop', instance.containerName], {
         windowsHide: true,
         timeout: 15_000,
       })
@@ -164,7 +204,7 @@ export class LocalDockerSandbox {
     if (!instance || instance.status !== 'stopped') return null
 
     try {
-      await execFileAsync('docker', ['start', instance.containerName], {
+      await execFileAsync(resolveDockerBin(), ['start', instance.containerName], {
         windowsHide: true,
         timeout: 15_000,
       })
@@ -190,7 +230,7 @@ export class LocalDockerSandbox {
   /** 检查 Docker 是否可用 */
   async isAvailable(): Promise<boolean> {
     try {
-      await execFileAsync('docker', ['version', '--format', '{{.Server.Version}}'], {
+      await execFileAsync(resolveDockerBin(), ['version', '--format', '{{.Server.Version}}'], {
         windowsHide: true,
         timeout: 5000,
       })
@@ -203,7 +243,7 @@ export class LocalDockerSandbox {
   /** 检查镜像是否存在，不存在则尝试构建 */
   async ensureImage(): Promise<void> {
     try {
-      await execFileAsync('docker', ['image', 'inspect', this.image], {
+      await execFileAsync(resolveDockerBin(), ['image', 'inspect', this.image], {
         windowsHide: true,
         timeout: 10_000,
       })
@@ -249,7 +289,7 @@ export class LocalDockerSandbox {
 
   /** 删除容器（不存在则静默） */
   private async removeContainer(name: string): Promise<void> {
-    await execFileAsync('docker', ['rm', '-f', name], {
+    await execFileAsync(resolveDockerBin(), ['rm', '-f', name], {
       windowsHide: true,
       timeout: 15_000,
     })

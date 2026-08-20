@@ -59,10 +59,8 @@ export class BuilderAgent {
       files.push(this.generatePageComponent(page, normalized))
     }
 
-    // 5. 数据源文件
-    if (normalized.schema.dataSources.length > 0) {
-      files.push(this.generateDataFile(normalized, appId))
-    }
+    // 5. 数据访问层（无条件生成：页面组件始终可能引用 '../api'，即使无数据源也应生成基础文件）
+    files.push(this.generateDataFile(normalized, appId))
 
     return { files }
   }
