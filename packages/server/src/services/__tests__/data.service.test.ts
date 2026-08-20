@@ -67,6 +67,15 @@ describe('validateRecordData 字段校验', () => {
     const good = validateRecordData(dateTable, { happenedAt: '2026-08-18T10:00:00Z' })
     expect(good.success).toBe(true)
   })
+
+  it('undefined 非必填字段应通过校验', () => {
+    const result = validateRecordData(customersTable, {
+      name: '张三',
+      age: undefined,
+      vip: undefined,
+    })
+    expect(result.success).toBe(true)
+  })
 })
 
 // ─── 查询逻辑 ────────────────────────────────────────────

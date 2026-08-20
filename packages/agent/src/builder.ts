@@ -40,6 +40,10 @@ export class BuilderAgent {
     // ── 结构归一化：兼容 LLM 输出的常见偏差（顶层 pages/dataSources / 缺失 schema 包裹等）──
     const normalized = this.normalizeAppModel(appModel)
 
+    // ── 修复「新增」功能：列表页需要创建入口，但 LLM 未必生成 form 页 ──
+    // 为每个有新增意图、却缺少对应 form 页的列表页，自动补一个 /{base}/new 创建页。
+    this.ensureCreatePages(normalized)
+
     const files: GeneratedFile[] = []
 
     // 1. 静态配置文件
@@ -96,6 +100,118 @@ export class BuilderAgent {
         dataSources: dataSources || [],
       },
     } as AppModel
+  }
+
+  /**
+   * 修复「新增」功能不可用：
+   * 当列表页的 Table 具备新增意图，但 AppModel 中没有对应的 form 页时，
+   * 自动补一个 /{base}/new 的创建页（含表单 + createRecord 提交 + 返回列表），
+   * 让「新增」按钮永远有真实可用的去处。
+   */
+  private ensureCreatePages(appModel: AppModel): void {
+    const pages = appModel.schema.pages
+    const routes = appModel.schema.routes
+
+    const findFormPage = (dsBase: string): AppModel['schema']['pages'][number] | undefined =>
+      pages.find((p) => p.pageType === 'form' && (p.tableId === dsBase || p.tableId === `database.${dsBase}`))
+    const findListPage = (dsBase: string): AppModel['schema']['pages'][number] | undefined =>
+      pages.find((p) => (p.pageType === 'list' || !p.pageType) && (p.tableId === dsBase || p.tableId === `database.${dsBase}`))
+
+    const added: string[] = []
+    for (const page of pages) {
+      if (page.pageType && page.pageType !== 'list') continue
+      for (const comp of page.components) {
+        if (comp.type !== 'Table') continue
+        const ds = comp.props?.dataSource as string | undefined
+        if (!ds) continue
+        const dsBase = ds.replace(/^database\./, '')
+        // 已有 form 页则交给既有链接逻辑，无需补页
+        if (findFormPage(dsBase)) continue
+        const createPath = `/${dsBase}/new`
+        // 避免重复生成
+        if (added.includes(dsBase) || routes.some((r) => r.path === createPath)) continue
+        added.push(dsBase)
+
+        const listPage = findListPage(dsBase)
+        const title = `${listPage?.title?.replace(/列表|管理/, '') || dsBase}新建`
+
+        // 关键修复：从数据源真实字段生成输入组件，而非硬编码 name/description，
+        // 避免提交到后端时字段缺失或多余导致校验失败。
+        const dsFields = this.inferFields(appModel, dsBase)
+        const dsTypes = this.inferFieldTypes(appModel, dsBase)
+        const childInputs: ComponentNode[] = dsFields.slice(0, 8).map((f, idx) => {
+          const t = dsTypes[f] ?? 'string'
+          if (t === 'number') {
+            return {
+              id: `f_${f}_${dsBase}_new`,
+              type: 'Input',
+              props: { field: f, label: f, placeholder: `请输入${f}`, type: 'number', required: idx === 0 },
+            }
+          }
+          if (t === 'boolean') {
+            return {
+              id: `f_${f}_${dsBase}_new`,
+              type: 'Select',
+              props: {
+                field: f,
+                label: f,
+                options: [
+                  { label: '是', value: 'true' },
+                  { label: '否', value: 'false' },
+                ],
+              },
+            }
+          }
+          // 字符串：前两个用 Input，其余用 Textarea
+          if (idx < 2) {
+            return {
+              id: `f_${f}_${dsBase}_new`,
+              type: 'Input',
+              props: { field: f, label: f, placeholder: `请输入${f}`, required: idx === 0 },
+            }
+          }
+          return {
+            id: `f_${f}_${dsBase}_new`,
+            type: 'Textarea',
+            props: { field: f, label: f, placeholder: `请输入${f}`, rows: 3 },
+          }
+        })
+
+        // 如果数据源没有可推断字段，回退到安全的最小集（id 必填为字符串）
+        if (childInputs.length === 0) {
+          childInputs.push({
+            id: `f_name_${dsBase}_new`,
+            type: 'Input',
+            props: { field: 'name', label: '名称', placeholder: '请输入名称', required: true },
+          })
+        }
+
+        const createPage: AppModel['schema']['pages'][number] = {
+          id: `page_${dsBase}_new`,
+          path: createPath,
+          title,
+          layout: page.layout || 'web',
+          pageType: 'form',
+          tableId: dsBase,
+          description: '新增记录',
+          components: [
+            {
+              id: `form_${dsBase}_new`,
+              type: 'Form',
+              props: {
+                title,
+                dataSource: dsBase,
+                submitText: '提交',
+                layout: 'vertical',
+              },
+              children: childInputs,
+            },
+          ],
+        }
+        pages.push(createPage)
+        routes.push({ path: createPath, pageId: createPage.id })
+      }
+    }
   }
 
   // ─── 静态文件生成 ──────────────────────────────────────
@@ -296,7 +412,13 @@ export default function App() {
         }
       }
     }
-    const matchLogic = aliasedRoutes
+    // 关键修复：静态路由必须排在动态路由之前匹配，否则 /products/new 会被 /products/:id 抢先命中。
+    const hasDynamic = (p: string) => p.split('/').filter(Boolean).some((s) => s.startsWith(':'))
+    const sortedAliasedRoutes = [
+      ...aliasedRoutes.filter((r) => !hasDynamic(r.path)),
+      ...aliasedRoutes.filter((r) => hasDynamic(r.path)),
+    ]
+    const matchLogic = sortedAliasedRoutes
       .map((r) => {
         const page = appModel.schema.pages.find((p) => p.id === r.pageId)
         if (!page) return null
@@ -692,8 +814,12 @@ ${finalComponentJsx}
   /**
    * 生成表单提交前的类型归一化代码：把 form state 中的字符串值按字段类型转换，
    * 避免后端严格类型校验（number/boolean）因前端字符串提交而失败。
-   * 返回形如：
-   *   const payload = { ...databaseProductsForm, price: Number(databaseProductsForm['price']), stock: Number(databaseProductsForm['stock']) }
+   *
+   * 关键修复：
+   * - 空字符串/undefined 不提交（不覆盖后端已有值），避免后端 typeof 校验失败。
+   * - boolean 字符串正确转换：'false'/'0'/'no'/'off'/'undefined' 等视为 false，
+   *   而不是 JavaScript 的 Boolean('false') === true。
+   * - number 转换过滤 NaN，避免提交无效数字导致校验失败。
    */
   private buildFormPayloadCode(formStateName: string, fieldTypes: Record<string, 'number' | 'boolean' | 'string'>, pad: string): string {
     const convertFields = Object.entries(fieldTypes).filter(([, type]) => type === 'number' || type === 'boolean')
@@ -701,11 +827,16 @@ ${finalComponentJsx}
       // 无需要转换的字段：直接使用 form state
       return `${pad}      const payload = ${formStateName}`
     }
+    const helperLines: string[] = []
+    helperLines.push(`${pad}      const __v = (v) => v === '' || v === undefined || v === null ? undefined : v`)
+    helperLines.push(`${pad}      const __bool = (v) => { if (v === undefined || v === null || v === '') return undefined; const s = String(v).trim().toLowerCase(); return s === 'true' || s === '1' || s === 'yes' || s === 'on'; }`)
+    helperLines.push(`${pad}      const __num = (v) => { const n = Number(v); return Number.isNaN(n) ? undefined : n; }`)
     const parts = convertFields.map(([key, type]) => {
-      const convert = type === 'number' ? 'Number' : 'Boolean'
-      return `'${this.escapeJsString(key)}': ${formStateName}['${this.escapeJsString(key)}'] === '' || ${formStateName}['${this.escapeJsString(key)}'] === undefined ? undefined : ${convert}(${formStateName}['${this.escapeJsString(key)}'])`
+      const raw = `${formStateName}['${this.escapeJsString(key)}']`
+      const convert = type === 'number' ? `__num(${raw})` : `__bool(${raw})`
+      return `'${this.escapeJsString(key)}': __v(${raw}) === undefined ? undefined : ${convert}`
     })
-    return `${pad}      const payload = { ...${formStateName}, ${parts.join(', ')} }`
+    return helperLines.join('\n') + '\n' + `${pad}      const payload = { ...${formStateName}, ${parts.join(', ')} }`
   }
 
   /** 递归判断组件树是否包含任何输入类组件（Input/Textarea/Select） */
@@ -827,7 +958,15 @@ ${finalComponentJsx}
         if (formDataSource) {
           const formStateName = `${this.toCamelCase(formDataSource)}Form`
           const setFormName = `set${this.capitalize(this.toCamelCase(formDataSource))}Form`
-          const fieldKey = this.normalizeFieldKey(String(node.props.field || node.props.name || node.id))
+          // 关键修复：当 LLM 给的 field/name 是中文或缺失时，按 label 自动对齐到数据源字段，
+          // 避免提交 payload 与后端 schema 不匹配导致校验失败。
+          const resolved = this.resolveFieldKey(
+            String(node.props.field || node.props.name || ''),
+            String(node.props.label || ''),
+            formDataSource,
+            appModel,
+          )
+          const fieldKey = resolved.key
           return `${pad}<div style={{ marginBottom: '12px' }}>\n${inputLabel}${pad}  <input type=${this.jsStr(node.props.type || 'text')} placeholder=${this.jsStr(node.props.placeholder)} value={${formStateName}['${this.escapeJsString(fieldKey)}'] || ''} onChange={(e) => ${setFormName}({ ...${formStateName}, '${this.escapeJsString(fieldKey)}': e.target.value })} required={${node.props.required || false}} />\n${pad}</div>`
         }
         return `${pad}<div style={{ marginBottom: '12px' }}>\n${inputLabel}${pad}  <input type=${this.jsStr(node.props.type || 'text')} placeholder=${this.jsStr(node.props.placeholder)} required={${node.props.required || false}} />\n${pad}</div>`
@@ -840,7 +979,13 @@ ${finalComponentJsx}
         if (formDataSource) {
           const formStateName = `${this.toCamelCase(formDataSource)}Form`
           const setFormName = `set${this.capitalize(this.toCamelCase(formDataSource))}Form`
-          const fieldKey = this.normalizeFieldKey(String(node.props.field || node.props.name || node.id))
+          const resolved = this.resolveFieldKey(
+            String(node.props.field || node.props.name || ''),
+            String(node.props.label || ''),
+            formDataSource,
+            appModel,
+          )
+          const fieldKey = resolved.key
           return `${pad}<div style={{ marginBottom: '12px' }}>\n${taLabel}${pad}  <textarea rows={${node.props.rows || 4}} placeholder=${this.jsStr(node.props.placeholder)} value={${formStateName}['${this.escapeJsString(fieldKey)}'] || ''} onChange={(e) => ${setFormName}({ ...${formStateName}, '${this.escapeJsString(fieldKey)}': e.target.value })} />\n${pad}</div>`
         }
         return `${pad}<div style={{ marginBottom: '12px' }}>\n${taLabel}${pad}  <textarea rows={${node.props.rows || 4}} placeholder=${this.jsStr(node.props.placeholder)} />\n${pad}</div>`
@@ -868,7 +1013,13 @@ ${finalComponentJsx}
         if (formDataSource) {
           const formStateName = `${this.toCamelCase(formDataSource)}Form`
           const setFormName = `set${this.capitalize(this.toCamelCase(formDataSource))}Form`
-          const fieldKey = this.normalizeFieldKey(String(node.props.field || node.props.name || node.id))
+          const resolved = this.resolveFieldKey(
+            String(node.props.field || node.props.name || ''),
+            String(node.props.label || ''),
+            formDataSource,
+            appModel,
+          )
+          const fieldKey = resolved.key
           return `${pad}<div style={{ marginBottom: '12px' }}>\n${selLabel}${pad}  <select value={${formStateName}['${this.escapeJsString(fieldKey)}'] || ''} onChange={(e) => ${setFormName}({ ...${formStateName}, '${this.escapeJsString(fieldKey)}': e.target.value })}>\n${pad}    <option value="">请选择</option>\n${options}\n${pad}  </select>\n${pad}</div>`
         }
         return `${pad}<div style={{ marginBottom: '12px' }}>\n${selLabel}${pad}  <select>\n${options}\n${pad}  </select>\n${pad}</div>`
@@ -894,11 +1045,48 @@ ${finalComponentJsx}
           // （Planner 未生成 Input / 生成了空 Section），则根据数据源字段自动
           // 生成受控输入，确保新增/编辑表单在预览中可用
           const hasInputs = children.length > 0 && this.hasInputInTree(children)
-          // Form 兜底：Planner 可能没生成 Input 组件（children 为空或只有 Header/Section）。
-          // 此时用运行时动态生成——从数据源加载后的第一条记录取字段名，渲染受控输入。
-          // 这样无论 Planner 生成什么结构的 Form 树，新增/编辑都能填写并保存。
+
+          // 关键修复：把 Form 直接子节点中的 Input/Textarea/Select 用真实字段名重写，
+          // 把未识别的 label/id（中文等）映射到数据源字段。其它子节点（如 Header/Section）保持原样。
           const formChildJsx = hasInputs
-            ? children.map((c) => this.renderComponent(c, indent + 2, dataSource, appModel)).join('\n')
+            ? (() => {
+                // 先收集所有直接子节点中的输入组件数量，用于 fallback index
+                const inputChildCount = children.reduce(
+                  (n, c) => n + (c.type === 'Input' || c.type === 'Textarea' || c.type === 'Select' ? 1 : 0),
+                  0,
+                )
+                const dsFields = appModel ? this.inferFields(appModel, dataSource) : []
+                // 给每个输入组件分配一个数据源字段序号（按出现顺序），用于 label 无法识别时的兜底
+                const counter = { idx: 0 }
+                return children
+                  .map((c) => {
+                    if (c.type === 'Input' || c.type === 'Textarea' || c.type === 'Select') {
+                      // 不把 c.id 当作 field 回退（id 只是节点唯一标识）。
+                      // resolveFieldKey 内部会先用 props.field/name，再用 label 匹配，
+                      // 最后用 fallbackIndex 兜底。
+                      const resolved = this.resolveFieldKey(
+                        String(c.props?.field ?? c.props?.name ?? ''),
+                        String(c.props?.label ?? ''),
+                        dataSource,
+                        appModel,
+                        counter.idx,
+                      )
+                      counter.idx += 1
+                      // 构造带真实字段名的节点副本（props.field 覆盖）
+                      const rewritten: ComponentNode = {
+                        ...c,
+                        props: {
+                          ...(c.props as Record<string, unknown>),
+                          field: resolved.key,
+                        },
+                      }
+                      // 递归渲染（Container/Section 嵌套场景也能命中）
+                      return this.renderComponent(rewritten, indent + 2, dataSource, appModel)
+                    }
+                    return this.renderComponent(c, indent + 2, dataSource, appModel)
+                  })
+                  .join('\n')
+              })()
             : this.generateRuntimeFormFields(dataSource, formStateName, setFormName, pad)
           // 编辑模式：提交时携带 :id 调用 updateRecord
           // 提交前做类型归一化：把 number/boolean 字段的字符串值转成正确类型，
@@ -1354,6 +1542,72 @@ ${staticExports}
       cur = next
     }
     return cur
+  }
+
+  /**
+   * 解析 Input/Textarea/Select 的真实字段名。
+   *
+   * 关键修复：LLM 经常把表单字段的 props.field 设为中文 label（"待办内容"/"状态"），
+   * 而后端数据表的字段是英文（"title"/"completed"），导致提交 payload 与 schema 不匹配 → 校验失败。
+   *
+   * 解析策略（按优先级）：
+   * 1) props.field/name 已是合法的英文/数字字段名 → 直接规范化后返回
+   * 2) 上述无法解析为合法 key（中文、空、纯 id 等）→ 按 label 在数据源字段列表中匹配：
+   *    a) label 与某字段完全相等 → 用该字段名
+   *    b) label 包含某字段（如 label="商品价格" 含 "price"）→ 用该字段名
+   *    c) 仍有多个 Input 但只剩一个未匹配字段 → 用它兜底
+   * 3) 都没有 → 退化使用规范化后的原始值
+   *
+   * 同时返回该字段在数据源中的类型推断（number/boolean/string），
+   * 让生成的 payload 转换代码能正确处理中文 key 路径。
+   */
+  private resolveFieldKey(
+    raw: string,
+    label: string,
+    dataSource: string,
+    appModel: AppModel | undefined,
+    fallbackIndex?: number,
+  ): { key: string; type: 'number' | 'boolean' | 'string' | null } {
+    const cleaned = this.normalizeFieldKey(raw || '').trim()
+    const dsFields = appModel && dataSource ? this.inferFields(appModel, dataSource) : []
+    const dsTypes = appModel && dataSource ? this.inferFieldTypes(appModel, dataSource) : {}
+
+    // 合法 key：纯英文/数字/下划线/驼峰（不含中文等 unicode letter）
+    const isLikelyFieldKey = (s: string): boolean => {
+      if (!s) return false
+      return /^[A-Za-z_$][A-Za-z0-9_$]*$/.test(s)
+    }
+
+    if (isLikelyFieldKey(cleaned)) {
+      // 优先匹配数据源字段，未匹配则保留 cleaned（兜底）
+      const matched = dsFields.find((f) => f === cleaned) ? cleaned : cleaned
+      return { key: matched, type: dsTypes[matched] ?? null }
+    }
+
+    const cleanLabel = String(label || '').trim()
+
+    // a) label 完全等于某字段
+    if (cleanLabel && dsFields.length > 0) {
+      const exact = dsFields.find((f) => f === cleanLabel)
+      if (exact) return { key: exact, type: dsTypes[exact] ?? null }
+
+      // b) label 包含某字段名（如 "商品价格" 含 "price"）
+      // 优先匹配较长字段，避免 "name" 抢占 "商品名称"
+      const sorted = [...dsFields].sort((a, b) => b.length - a.length)
+      for (const f of sorted) {
+        if (cleanLabel.includes(f)) {
+          return { key: f, type: dsTypes[f] ?? null }
+        }
+      }
+    }
+
+    // c) 兜底：使用 fallbackIndex 顺序消费数据源字段
+    if (typeof fallbackIndex === 'number' && dsFields[fallbackIndex]) {
+      const f = dsFields[fallbackIndex]
+      return { key: f, type: dsTypes[f] ?? null }
+    }
+
+    return { key: cleaned || cleanLabel || 'field', type: null }
   }
 
   /** 首字母大写 */

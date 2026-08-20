@@ -248,8 +248,12 @@ data.patch('/records/:recordId', async (c) => {
     return c.json({ error: 'data (object) is required' }, 400)
   }
 
-  // 合并 + 校验
-  const merged = { ...parseRecordData(row.dataJson), ...newData }
+  // 合并 + 校验：忽略 newData 中为 undefined 的字段，避免覆盖已有值并导致类型校验失败。
+  const cleanedNewData: Record<string, unknown> = {}
+  for (const [key, value] of Object.entries(newData)) {
+    if (value !== undefined) cleanedNewData[key] = value
+  }
+  const merged = { ...parseRecordData(row.dataJson), ...cleanedNewData }
   const tableSchema = toTableSchema(table)
   const validation = validateRecordData(tableSchema, merged)
   if (!validation.success) {
