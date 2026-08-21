@@ -9,7 +9,7 @@ AI快搭（AIKD）是一个基于 TypeScript 的 pnpm monorepo 低代码搭建�
 | 文档 | 说明 |
 |------|------|
 | [AIKD-V1-PLAN.md](AIKD-V1-PLAN.md) | V1 产品规格与实施计划（最高优先级需求文档） |
-| [DEVELOPER.md](DEVELOPER.md) | 开发与运行说明（环境、架构、调试、构建） |
+| [DEVELOPER.md](DEVELOPER.md) | 开发与运行说明（环境、架构、调试、构建、V1.1 迭代记录） |
 | [NOTICE](NOTICE) | 开源 / 许可证声明 |
 
 ## 仓库结构
@@ -24,12 +24,12 @@ AIKD-V1/
 ├── tsconfig.json          # 全局 TS 配置
 ├── scripts/               # 仓库级脚本（初始化、构建、部署）
 └── packages/
-    ├── web/               # @aikd/web    前端（React 19 + Vite）
+    ├── web/               # @aikd/web    前端（React + Vite，对话驱动的迭代修改预览）
     ├── server/            # @aikd/server 后端（Hono + SQLite + 沙箱 + Provider 管理）
-    ├── shared/            # @aikd/shared 共享类型与协议定义
+    ├── shared/            # @aikd/shared 共享类型与协议定义（含 App Model V1.1 高级特性）
     ├── app-engine/        # @aikd/app-engine App Model schema / 校验 / 版本 / 模板
-    ├── component-registry/# @aikd/component-registry 内置组件 + props schema
-    └── agent/             # @aikd/agent  Multi-Agent 编排 + 应用自动测试与修复 + Runtime/自愈
+    ├── component-registry/# @aikd/component-registry 内置组件 + props schema + Ant Design 适配
+    └── agent/             # @aikd/agent  Multi-Agent 编排（LLM 驱动 Builder）+ 自动测试与修复 + UI 视觉评审 + 增量迭代
 ```
 
 各包详细职责与目录树见 [DEVELOPER.md · 仓库结构](DEVELOPER.md#仓库结构)。
@@ -38,11 +38,23 @@ AIKD-V1/
 
 - **Monorepo**：pnpm workspace + TypeScript
 - **前端**：React 19 + Vite
+- **UI**：**Ant Design**（antd）+ styled-components + react-router-dom v6
+- **状态管理**：**Zustand**（应用内全局状态）
+- **网络**：axios / fetch（统一封装到 `src/api.ts`）
 - **后端**：Hono + `@hono/node-server`（Node ≥ 22）
 - **数据库**：SQLite（better-sqlite3 + drizzle-orm）
 - **LLM**：OpenAI 兼容接口（兼容 DeepSeek / OpenAI / Anthropic / Gemini / Qwen / 自定义 OpenAI Compatible Provider）
 - **模型管理**：内置 Provider + 自定义 Provider，支持 API Key 配置、连接测试、动态切换与持久化
+- **测试**：Vitest（agent 单元测试）、**Playwright**（UI 视觉评审截图）、**axe-core**（可访问性）
 - **沙箱预览**：Node 本地子进程（默认）或 Docker 容器，每应用独立 Vite Dev Server
+
+## 核心能力
+
+- **自然语言生成应用**：Multi-Agent 编排（需求分析 → Blueprint → 代码生成），产出 React + Vite 应用
+- **LLM 驱动代码生成**：Builder 生成多文件、工程化代码（函数组件 + antd + Zustand + axios + styled-components + react-router v6），带静态完整性校验与确定性兜底
+- **自动测试与修复闭环**：五大维度校验，未达标自动修复并重测（最多 5 轮）
+- **UI 视觉评审**：Playwright 截图（或静态规则降级）对布局/色彩/字体/间距/操作反馈打分，低于阈值自动回传 Builder 优化（≤2 轮）
+- **对话驱动的迭代修改**：在聊天框继续输入修改指令即可增量更新应用（保留主题与数据源），完成后自动刷新预览
 
 ## 快速开始
 
@@ -110,7 +122,7 @@ pnpm build        # 构建全部包（web + server）
 pnpm start        # 启动 server（使用构建产物）
 pnpm type-check   # 类型检查
 pnpm lint         # ESLint
-pnpm --filter @aikd/agent test   # agent 单元测试（生成/测试闭环/修复等）
+pnpm --filter @aikd/agent test   # agent 单元测试（生成/LLM Builder/测试闭环/UI 评审/增量迭代等）
 pnpm db:studio    # 打开 drizzle-studio 查看数据库
 ```
 
