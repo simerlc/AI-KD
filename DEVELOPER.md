@@ -139,18 +139,35 @@ pnpm --filter @aikd/server dev
 ### App Model
 中心 JSON schema，描述 `pages`、`routes`、`components`、`theme` 与 `dataSources`。类型定义见 `packages/shared/src/types/app-model.ts`。
 
+**高级特性扩展（V1.1+）**：App Model 现已支持更丰富的蓝图表达，可在原结构上叠加：
+- **主题（Theme）**：`borderRadius`（圆角）、`spacing`（基础间距单位）、`darkMode`（暗黑模式）等可选字段
+- **数据源（DataSource）**：`type` 支持 `static | mock | rest | graphql | local`，远程数据源含 `url` / `method` / `headers` / `responseMapping`（如 `data.list`）
+- **事件（Action）**：组件通过 `events` 声明交互动作（`navigate | callApi | updateState | showModal | custom`），含 `target` / `payload`
+- **组件增强**：`ComponentNode` 新增可选 `style`、`events`、`dataBinding`（`sourceId` + `path`）字段
+- **富模型 `AppModelV2`**：在 `app-model.ts` 末尾定义，整合 theme / layout / pages（RichPage）/ dataSources / globalState，并配套完整 Zod schema（`AppModelV2Schema` 及 `ActionZodSchema` / `ThemeZodSchema` / `DataSourceZodSchema` 等，均以 `Zod` 后缀命名避免与 `app-schema.ts` 冲突）。
+
 ### Multi-Agent 编排（生成主流程）
 主流程由 `packages/agent/src/multi-agent/orchestrator.ts` 驱动，角色见 `multi-agent/agents/`：
 
 1. **RequirementAgent**（`requirement.ts`）：解析用户自然语言需求 → 结构化需求。
 2. **BlueprintAgent**（`blueprint.ts` + `blueprint/`）：产出 Blueprint（页面 / 组件 / 数据源 / 流程），经 `validator.ts`、`application-validator.ts`、`integrity-checker.ts` 校验。
-3. **CodingAgent**（`coding.ts`）：将 Blueprint 转成代码文件（经由 `builder.ts` 确定性生成 React + Vite 工程，不依赖 LLM）。
+3. **CodingAgent**（`coding.ts`）：将 Blueprint 转成代码文件（经由 `builder.ts` 生成 React + Vite 工程，默认 **LLM 驱动**，校验失败回退确定性生成）。
 4. **ReviewAgent / FixAgent**（`review.ts` / `fix.ts`）：代码评审与定向修复。
 5. **ApplicationTestAgent**（见下节）：生成后自动测试，通过后进入 Preview。
 
 > **旧路径（Planner → Builder → Tester）**：`src/planner.ts`、`src/builder.ts`、`src/tester.ts`、`src/orchestrator.ts` 仍保留兼容。
 > - Planner 将自然语言转 App Model JSON（含验证 + 重试，默认 3 次）。**注意**：LLM 调用 `max_tokens: 8192`，若使用推理模型（如 `deepseek-v4-flash`）思考会消耗大量 token，token 上限过低会导致返回的 `content` 被截断为空，最终 fallback 到"未命名应用"默认模板；若生成结果始终是默认模板，优先排查 LLM 是否返回空内容。重试全部失败时**会抛错**（不再静默 fallback），错误会透传到前端。
-> - Builder 关键文件: `packages/agent/src/builder.ts`。页面文件约定为 `src/pages/{page.id}.tsx`（如 `src/pages/page_home.tsx`），`package.json` 自带 `react-router-dom` / `antd` 依赖。
+> - Builder 关键文件: `packages/agent/src/builder.ts`。**已改为 LLM 驱动**：主路径调用 LLM 生成多文件、工程化代码（函数组件 + Hooks + antd + Zustand + axios + styled-components + react-router-dom v6），输出「文件路径 + 内容」JSON 数组，经 `checkIntegrity` 静态校验（失败重试 2 次），全部失败回退到确定性生成兜底。页面文件约定为 `src/pages/{page.id}.tsx`（如 `src/pages/page_home.tsx`），`package.json` 自带 `react-router-dom` / `antd` 依赖。
+> - **增量修改**：`planner.ts` 提供 `planIncremental()`（专用 `PLANNER_INCREMENTAL_PROMPT`），严格保留主题（theme）与数据源（dataSources），只改动被提及的页面/组件；单 agent Orchestrator 的修改模式默认走增量 Prompt。
+
+### UI 视觉评审与自动修复闭环
+`packages/agent/src/design-system/ui-visual-review.ts`：在 Tester 环节引入的 UI 视觉评审，对**布局 / 色彩 / 字体 / 间距 / 操作反馈**五个维度打分（1-10）并给出改进建议：
+- **优先**：提供 `previewUrl` 时，动态加载 Playwright 对渲染页面截图，提取视觉元数据（标题层级 / 按钮表单数量 / 颜色数量 / 字体 / 图片 alt）评分
+- **降级**：Playwright 不可用时退化为静态代码规则检查（确定性、可测试）
+- **修复闭环**：分数 < 阈值（默认 7）时，把「原蓝图 + 改进建议」回传 Builder 重新生成，重复「评审→修复→重测→再评审」最多 2 轮；**仅在功能测试通过时才允许重生成**，避免视觉修复破坏功能正确性
+
+### Ant Design 组件适配
+`packages/component-registry/src/components/antd.ts`：将 Ant Design 常用组件（Button / Input / Table / Form / Modal / Tabs / Select / DatePicker / Layout 系列 / Menu 等）注册进组件库，导出 `antdComponents` / `antdComponentAdapters`（含 `propNames` 属性清单）/ `antdComponentNames` 等，供 Builder 在 LLM 生成时引用主题变量与专业组件。
 
 ### 应用生成后自动全功能测试与自动修复（tester）
 位于 `packages/agent/src/multi-agent/tester/`，在生成完成后、进入 Preview **之前**强制执行：
@@ -186,7 +203,7 @@ pnpm --filter @aikd/server dev
 `packages/agent/src/runtime-agent/`：以 Tool Calling 方式调用 filesystem / terminal / browser 工具（`tools/`），实现运行时自动化操作。
 
 ### 组件注册表
-所有可用组件的元信息与 props schema，供 Planner/Builder 使用（`packages/component-registry/src/index.ts`）。
+所有可用组件的元信息与 props schema，供 Planner/Builder 使用（`packages/component-registry/src/index.ts`）。内置 Ant Design 组件适配见「Ant Design 组件适配」小节。
 
 ### 沙箱（预览）
 每个 app 对应一个独立 Vite Dev Server，工作区挂载于 `./workspaces/{appId}/`。
@@ -240,9 +257,19 @@ OpenAI Compatible /chat/completions
 4. 测试通过后启动/重建沙箱（总是销毁旧沙箱重新启动，确保加载最新代码）→ 进入 Preview（**Preview 必须是最后一步**）
 5. 用户在预览中验证并创建版本（快照）
 
+### 用户迭代修改（对话驱动）
+用户在**聊天对话框**继续输入自然语言修改指令（如"增加一个统计页面"）即可对已生成应用做增量修改：
+1. 后端 `session/prompt` 检测到任务已有 `appModelId`，自动进入修改模式
+2. Planner 走增量 Prompt（`planIncremental`）：保留主题/数据源，只改动被提及的页面/组件
+3. Builder + Tester 重新生成代码并测试 → 写文件 + 重建沙箱
+4. 前端对话完成后（`onStreamComplete`）自动自增 `previewKey`，刷新预览 iframe 到最新代码
+
+> **集成说明**：迭代修改已完全集成到对话框，不再使用独立的 `/api/iterate` 输入框或路由（已移除），避免两套重复逻辑。
+
 ### 添加 / 修改组件
 - 在 `packages/component-registry` 中定义新组件与 `propsSchema`
 - 如组件有特殊渲染，更新 `packages/agent/src/builder.ts` 的模板逻辑
+- 若封装 Ant Design 组件，在 `packages/component-registry/src/components/antd.ts` 中按 `adapt(def, propNames)` 模式添加，并加入 `adapters` 数组使其注册进组件库
 
 ### 调试 Planner 输出
 - 在本地触发 Planner（可通过后端路由或单元测试），将输出的 JSON 用 `packages/app-engine` 的验证器校验
@@ -300,7 +327,7 @@ pnpm --filter @aikd/agent test
 pnpm --filter @aikd/agent test:watch
 ```
 
-agent 测试覆盖：Builder 生成正确性、Multi-Agent 编排、**应用测试与修复闭环**（悬空 import 定位、修复后重测通过、Patch-first、5 轮上限）、Auto-Debug、Runtime Agent 等。
+agent 测试覆盖：Builder 生成正确性（含 LLM 驱动路径）、Multi-Agent 编排、**应用测试与修复闭环**（悬空 import 定位、修复后重测通过、Patch-first、5 轮上限）、UI 视觉评审（`ui-visual-review.test.ts`）、增量修改（`planner-incremental.test.ts`）、迭代流水线（`iterate-pipeline.test.ts`）、Auto-Debug、Runtime Agent 等。
 
 推荐在 CI 中加入：`pnpm type-check`、`pnpm lint`、`pnpm --filter @aikd/agent test`，以及生成/构建工作流验证 `Builder` 输出。
 
@@ -332,3 +359,14 @@ agent 测试覆盖：Builder 生成正确性、Multi-Agent 编排、**应用测�
 - **模型能力增强**：接入更多 Provider 专属能力（函数调用 / 视觉 / 推理），支持流式输出在生成过程的实时展示
 - **Provider 加密存储**：将服务端 `providers/storage.ts` 从明文 JSON 升级为加密存储（数据库密文 / KMS），进一步提升密钥安全
 - **生成应用能力扩展**：使生成的应用不再只是简单的 web 页面，能够实现更完整的业务功能
+
+## 近期迭代记录
+
+以下为 V1.1 开发迭代（步骤 1-5）的变更摘要：
+
+1. **升级数据模型**：扩展 `app-model.ts`，新增 Theme（圆角/间距/暗黑）、DataSource（rest/graphql/local + URL/映射）、Action（事件动作）、组件 style/events/dataBinding/children，并配套 Zod schema（`AppModelV2Schema` 等）。
+2. **集成 Ant Design 组件库**：`component-registry` 新增 antd 适配模块（Button/Input/Table/Form/Modal/Tabs/Select/DatePicker/Layout/Menu 等），含可用属性名称清单，Builder 可直接引用专业组件。
+3. **重写 Planner/Builder 核心提示词**：Planner 输出富含设计细节（主题/布局/数据绑定/事件动作/列表页/表单页/响应式/视觉设计）的纯 JSON；Builder 改为 **LLM 驱动**，生成多文件、工程化 React 代码（函数组件 + antd + Zustand + axios + styled-components + react-router v6），输出文件 JSON 数组。
+4. **增强测试与自动修复闭环**：新增 `UiVisualReviewer`（Playwright 截图 + 静态规则降级），五维度打分，低于 7 分自动回传 Builder 修复（≤2 轮，保护功能正确性）。
+5. **实现用户迭代对话与增量修改**：新增 `planner.planIncremental`（专用增量 Prompt，保留主题/数据源），随后**集成到聊天对话框**——对话生成完成后自动刷新预览，移除独立的 `/api/iterate` 入口。
+6. **新增依赖**：antd、styled-components、zustand、react-router-dom、axios、@types/styled-components、@playwright/test、axe-core。
