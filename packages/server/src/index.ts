@@ -36,7 +36,6 @@ import tasksRoutes from './routes/tasks'
 import miscRoutes from './routes/misc'
 import dataRoutes from './routes/data'
 import providersRoutes from './routes/providers'
-import iterateRoutes from './routes/iterate'
 
 const app = new Hono<AppEnv>()
 
@@ -55,7 +54,6 @@ app.use('*', authMiddleware)
 app.get('/health', (c) => c.json({ status: 'ok' }))
 app.route('/api/agent', acpRoutes)
 app.route('/api/tasks', tasksRoutes)
-app.route('/api/iterate', iterateRoutes)
 app.route('/api/data', dataRoutes)
 app.route('/api/providers', providersRoutes)
 app.route('/api', miscRoutes)
