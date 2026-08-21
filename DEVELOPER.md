@@ -362,7 +362,7 @@ agent 测试覆盖：Builder 生成正确性（含 LLM 驱动路径）、Multi-A
 
 ## 近期迭代记录
 
-以下为 V1.1 开发迭代（步骤 1-5）的变更摘要：
+以下为 V2 开发迭代（步骤 1-5）的变更摘要：
 
 1. **升级数据模型**：扩展 `app-model.ts`，新增 Theme（圆角/间距/暗黑）、DataSource（rest/graphql/local + URL/映射）、Action（事件动作）、组件 style/events/dataBinding/children，并配套 Zod schema（`AppModelV2Schema` 等）。
 2. **集成 Ant Design 组件库**：`component-registry` 新增 antd 适配模块（Button/Input/Table/Form/Modal/Tabs/Select/DatePicker/Layout/Menu 等），含可用属性名称清单，Builder 可直接引用专业组件。
