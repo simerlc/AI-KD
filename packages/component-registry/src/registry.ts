@@ -7,6 +7,7 @@ import { Image, Card, List, Table, Detail } from './components/display'
 import { Header, Footer, NavBar, Tabs } from './components/navigation'
 import { Alert, Badge, Modal } from './components/feedback'
 import { Dashboard, StatCard, Chart, Login } from './components/advanced'
+import { antdComponents } from './components/antd'
 import { defaultUsageExamples } from './usage-examples'
 
 // ─── 内置组件注册表 ──────────────────────────────────────
@@ -50,6 +51,8 @@ const builtinComponents: ComponentDefinition[] = [
   StatCard,
   Chart,
   Login,
+  // Ant Design 组件（让 Builder 可直接调用专业组件）
+  ...antdComponents,
 ]
 
 // ─── Registry 实现 ───────────────────────────────────────

@@ -49,7 +49,7 @@ export interface BlueprintGeneratorResult {
   retries: number
 }
 
-const BLUEPRINT_GENERATOR_SYSTEM_PROMPT = `你是 AI快搭 的 BlueprintGenerator，负责根据需求分析结果生成「应用蓝图」（Application Blueprint）。
+const BLUEPRINT_GENERATOR_SYSTEM_PROMPT = `你是 AI快搭 的 BlueprintGenerator，负责根据需求分析结果生成「应用蓝图」（Application Blueprint）。规划阶段必须输出富含设计细节的蓝图：全局主题、页面布局、组件数据绑定与事件动作。
 
 ## 核心原则
 用户需求绝不能直接进入代码生成。你必须先生成一份**合法、完整**的应用蓝图，CodingAgent 只允许读取校验通过后的合法 Blueprint。
@@ -61,6 +61,28 @@ const BLUEPRINT_GENERATOR_SYSTEM_PROMPT = `你是 AI快搭 的 BlueprintGenerato
 4. **dataModel**：数据模型（表 + 字段，字段 type 必须是 string/number/boolean/date/datetime/enum/uuid）
 5. **apiDesign**：API 设计（接口列表，含 method/path/description/crud）
 6. **userFlow**：用户流程（用户操作路径，steps 引用页面 id）
+
+## 全局主题（强制）
+- 蓝图必须体现全局主题：为应用定义主色（primaryColor）、圆角、字体、间距等设计变量，并确保 pageComponents 中的组件样式引用这些设计变量（如使用 --ds-color-* / theme 变量），禁止自由造颜色与间距
+
+## 页面布局（强制）
+- 每个页面必须显式定义 layout 类型，并说明其响应式适配方式
+- 每个页面必须包含至少 1 个有实际内容的组件
+
+## 组件数据绑定与事件（强制）
+- 组件的数据来源必须通过数据绑定表达（dataBinding：sourceId 对应数据源 id，path 声明字段路径）
+- 交互行为必须通过事件表达（events：onClick/onChange/onSubmit → navigate / callApi / updateState / showModal / custom）
+
+## 列表页规范（强制）
+- 列表页必须包含：**搜索**（searchable）、**分页**（pagination）、**操作按钮**（actions: detail/edit/delete）
+- Table 必须绑定数据源并声明字段映射
+
+## 表单页规范（强制）
+- 表单页必须包含：**字段校验**（required / rules）与**提交流程**（submit 事件绑定 callApi 或 updateState）
+
+## 响应式与视觉设计（强制）
+- 所有页面必须支持移动端响应式
+- 遵循视觉设计原则：F 型视觉流（重要内容左上优先）、色彩对比度（文本/背景对比达标）、统一间距与圆角
 
 ## 组件复用原则（重要）
 优先复用组件库中已存在的组件，避免从零拼装。请根据页面类型选择最合适的组件：
@@ -94,13 +116,14 @@ ${registry.toPromptDescription()}
 - **字段 type 只能是**："string" | "number" | "boolean" | "date" | "datetime" | "enum" | "uuid"
 
 ## 输出格式
-请直接输出 Blueprint JSON（不要包含代码块之外的说明文字）。结构：
+请直接输出 Blueprint JSON（纯 JSON，不要包含代码块之外的说明文字）。结构：
 {
   "schemaVersion": "1.0.0",
   "appName": "应用名称",
   "appType": "web | h5 | static",
+  "theme": { "primaryColor": "#1677ff", "fontFamily": "Inter, sans-serif", "borderRadius": 8, "spacing": 8 },
   "pages": [{ "id": "page_home", "path": "/", "title": "首页", "layout": "web", "pageType": "home", "description": "页面说明", "tableId": "products" }],
-  "pageComponents": [{ "pageId": "page_home", "components": [{ "id": "c1", "type": "Heading", "props": {} }] }],
+  "pageComponents": [{ "pageId": "page_home", "components": [{ "id": "c1", "type": "Heading", "props": {}, "dataBinding": { "sourceId": "products", "path": "name" }, "events": { "onClick": { "type": "navigate", "target": "/products" } } }] }],
   "dataModel": { "tables": [{ "id": "products", "name": "商品", "fields": [{ "name": "name", "type": "string", "required": true }] }] },
   "apiDesign": { "endpoints": [{ "id": "list_products", "method": "GET", "path": "/api/products", "description": "商品列表", "crud": "list", "tableId": "products" }] },
   "userFlow": { "flows": [{ "id": "flow1", "name": "浏览下单", "description": "流程说明", "steps": [{ "id": "s1", "description": "浏览首页", "pageId": "page_home", "action": "view" }] }] }

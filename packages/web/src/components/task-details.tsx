@@ -1,5 +1,6 @@
 import type { Task } from '@aikd/shared'
 import { Button } from '@/components/ui/button'
+import { Input } from '@/components/ui/input'
 import {
   CheckCircle,
   AlertCircle,
@@ -153,6 +154,9 @@ export function TaskDetails({
   const [previewLoadingMessage, setPreviewLoadingMessage] = useState('正在启动预览...')
   const [iframeLoaded, setIframeLoaded] = useState(false)
   const previewIframeRef = useRef<HTMLIFrameElement | null>(null)
+  const [iterateInstruction, setIterateInstruction] = useState('')
+  const [iterating, setIterating] = useState(false)
+  const [iterateError, setIterateError] = useState<string | null>(null)
 
   const [selectedFile, setSelectedFile] = useState<string | null>(null)
   const [filesPaneWidth, setFilesPaneWidth] = useState(() => getFilesPaneWidth())
@@ -213,6 +217,39 @@ export function TaskDetails({
       setPreviewGatewayLoading(false)
     }
   }, [task.id, canLoadPreview])
+
+  // 用户迭代修改：将修改指令与当前蓝图提交给 /api/iterate，
+  // 后端调用 Planner 增量生成 → Builder + Tester 重新生成代码，随后刷新预览。
+  const handleIterate = useCallback(async () => {
+    const instruction = iterateInstruction.trim()
+    if (!instruction || iterating) return
+    setIterating(true)
+    setIterateError(null)
+    try {
+      const res = await fetch('/api/iterate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({ sessionId: task.id, instruction }),
+      })
+      const data = (await res.json()) as { error?: string; previewUrl?: string }
+      if (!res.ok || data.error) {
+        throw new Error(data.error || `HTTP ${res.status}`)
+      }
+      // 修改成功：清空输入，若后端返回新预览地址则直接使用，否则重新拉取预览 URL
+      setIterateInstruction('')
+      if (data.previewUrl) {
+        setPreviewGatewayUrl(data.previewUrl)
+        setPreviewKey((k) => k + 1)
+      } else {
+        setPreviewKey((k) => k + 1)
+      }
+    } catch (err) {
+      setIterateError(err instanceof Error ? err.message : '迭代修改失败')
+    } finally {
+      setIterating(false)
+    }
+  }, [iterateInstruction, iterating, task.id])
 
   useEffect(() => {
     if (showPreviewPane && canLoadPreview && !previewGatewayUrl && !previewGatewayLoading && !previewGatewayError) {
@@ -382,6 +419,28 @@ export function TaskDetails({
               </Button>
             )}
           </div>
+        </div>
+        <div className="flex items-center gap-2 border-b border-border/60 px-3 py-2 flex-shrink-0">
+          <Input
+            value={iterateInstruction}
+            onChange={(e) => setIterateInstruction(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') void handleIterate()
+            }}
+            placeholder="输入修改指令，如：增加一个统计页面"
+            className="h-8 text-sm"
+            disabled={iterating}
+          />
+          <Button
+            size="sm"
+            className="h-8 flex-shrink-0"
+            onClick={() => void handleIterate()}
+            disabled={iterating || !iterateInstruction.trim()}
+          >
+            {iterating ? <Loader2 className="h-3.5 w-3.5 animate-spin mr-1" /> : <RefreshCw className="h-3.5 w-3.5 mr-1" />}
+            修改
+          </Button>
+          {iterateError && <span className="text-xs text-destructive flex-shrink-0">{iterateError}</span>}
         </div>
         <div className="flex-1 min-h-0 relative bg-muted/30">
           {previewGatewayLoading ? (

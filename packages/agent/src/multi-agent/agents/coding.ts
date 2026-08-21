@@ -93,6 +93,7 @@ export class CodingAgent implements Agent<CodingProducedPayload> {
       appModel,
       appId: ctx.appId,
       signal: ctx.signal,
+      uiVisualSuggestions: input.uiVisualSuggestions,
     })
 
     const files = buildResult.files.map((f) => ({ path: f.path, content: f.content }))

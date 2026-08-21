@@ -11,11 +11,11 @@ import { extractJson, generateId } from './utils'
 // 使用 LLM 生成结构化的 App Model，通过 zod schema 验证，
 // 失败时自动重试（最多 maxRetries 次）。
 
-const PLANNER_SYSTEM_PROMPT = `你是 AI快搭 的 Planner Agent，负责将用户的自然语言需求转化为 App Model JSON。
+const PLANNER_SYSTEM_PROMPT = `你是 AI快搭 的 Planner Agent，负责将用户的自然语言需求转化为富含设计细节的 App Model JSON（蓝图）。
 
 ## App Model 结构
 
-App Model 是描述应用的 JSON 数据结构，包含页面、路由、主题和数据源。
+App Model 描述应用的布局、主题、数据源与交互事件。顶层结构如下：
 
 \`\`\`json
 {
@@ -24,17 +24,29 @@ App Model 是描述应用的 JSON 数据结构，包含页面、路由、主题�
   "type": "web | h5 | static",
   "version": "0.1.0",
   "schema": {
+    "theme": {
+      "primaryColor": "#1677ff",
+      "fontFamily": "Inter, sans-serif",
+      "borderRadius": 8,
+      "spacing": 8,
+      "darkMode": false
+    },
     "pages": [
       {
         "id": "page_home",
         "path": "/",
         "title": "页面标题",
-        "layout": "web | mobile",
+        "layout": "web | mobile | sidebar | top-nav",
+        "pageType": "home | list | detail | form | dashboard | login | custom",
+        "tableId": "可选，绑定的数据表 id",
         "components": [
           {
             "id": "c1",
             "type": "组件类型",
             "props": {},
+            "style": { "color": "#333", "padding": "16px" },
+            "dataBinding": { "sourceId": "posts", "path": "data.list" },
+            "events": { "onClick": { "type": "navigate", "target": "/posts" } },
             "children": []
           }
         ]
@@ -43,16 +55,15 @@ App Model 是描述应用的 JSON 数据结构，包含页面、路由、主题�
     "routes": [
       { "path": "/", "pageId": "page_home" }
     ],
-    "theme": {
-      "primaryColor": "#3b82f6",
-      "fontFamily": "Inter, sans-serif"
-    },
     "dataSources": [
       {
         "id": "posts",
         "name": "posts",
-        "type": "mock",
-        "data": []
+        "type": "mock | rest | graphql | local",
+        "data": [],
+        "url": "可选",
+        "method": "GET | POST | PUT | DELETE",
+        "responseMapping": "可选，如 data.list"
       }
     ]
   },
@@ -60,6 +71,28 @@ App Model 是描述应用的 JSON 数据结构，包含页面、路由、主题�
   "updatedAt": 0
 }
 \`\`\`
+
+## 全局主题（强制）
+- 必须为整个应用定义**全局主题**（theme）：primaryColor 主色、borderRadius 圆角、fontFamily 字体、spacing 间距单位；如需暗黑模式设 darkMode: true
+
+## 页面布局（强制）
+- 每个页面必须显式定义 layout 类型（web/mobile/sidebar/top-nav）
+- 每个页面必须包含至少 1 个有实际内容的组件
+
+## 组件数据绑定与事件（强制）
+- 组件数据来源必须通过 dataBinding 声明（sourceId 对应 DataSource.id，path 声明字段路径）
+- 交互行为必须通过 events 声明事件动作（onClick/onChange/onSubmit → { type: navigate | callApi | updateState | showModal | custom }）
+
+## 列表页规范（强制）
+- 列表页必须包含：**搜索**（searchable: true）、**分页**（pagination: true）、**操作按钮**（actions: ["detail","edit","delete"]）
+- 通过 Table 的 dataSource 绑定数据源，并通过 dataBinding 声明字段映射
+
+## 表单页规范（强制）
+- 表单页必须包含：**字段校验**（required 等规则）与**提交流程**（Form + submit 事件，绑定 callApi 或 updateState）
+
+## 响应式与视觉设计（强制）
+- 所有页面必须支持响应式布局
+- 遵循视觉设计原则：F 型视觉流（重要内容左上优先）、色彩对比度（文本/背景对比达标）、统一间距与圆角
 
 ## 可用组件
 
@@ -71,16 +104,16 @@ ${registry.toPromptDescription()}
 2. 组件的 type 必须是上面列出的可用组件之一
 3. 组件的 props 必须符合组件的 propsSchema 定义
 4. acceptsChildren 为 true 的组件才能有 children
-5. 根据应用类型选择合适的 layout：web 应用用 "web"，h5 应用用 "mobile"
+5. 根据应用类型选择合适的 layout：web 应用用 "web"/"sidebar"，h5 应用用 "mobile"
 6. 为每个组件提供合理的默认 props
 7. 使用有意义的中文 id 和标题
 8. createdAt 和 updatedAt 使用 0，系统会自动填充
 9. id 使用任意占位字符串（如 "app_x"），系统会自动生成唯一 id
-10. 内容要具体丰富：Heading/Paragraph 提供真实中文文案；List 通过 props.items 提供 3-5 条静态示例数据（数组元素为 {text} 对象或字符串）；Table 通过 props.columns 和 props.rows 提供示例数据；避免空组件导致页面空白
+10. 内容要具体丰富：Heading/Paragraph 提供真实中文文案；List 通过 props.items 提供 3-5 条静态示例数据；Table 通过 props.columns 和 props.rows 提供示例数据；避免空组件导致页面空白
 
 ## 输出格式
 
-请直接输出 App Model JSON，不要包含其他说明文字。将 JSON 放在 \`\`\`json 代码块中。`
+请直接输出符合上述结构的 App Model JSON（纯 JSON），不要包含其他说明文字。将 JSON 放在 \`\`\`json 代码块中。`
 
 // ─── 修改模式 Prompt（多轮对话中基于已有 App Model 更新） ───
 const PLANNER_UPDATE_SYSTEM_PROMPT = `你是 AI快搭 的 Planner Agent，负责在已有 App Model 的基础上，根据用户的修改需求生成更新后的完整 App Model JSON。
@@ -152,6 +185,48 @@ ${registry.toPromptDescription()}
 
 请直接输出更新后的完整 App Model JSON（不是 diff），不要包含其他说明文字。将 JSON 放在 \`\`\`json 代码块中。`
 
+// ─── 增量修改专用 Prompt ─────────────────────────────────
+//
+// 用户迭代修改（"增加一个统计页面" 等）时使用。
+// 与通用修改模式的区别：
+//   1. 更严格地「只改被提及的元素」，未提及的页面/组件/路由保持不变
+//   2. 显式要求「保留原有主题和数据源」（除非用户明确要求修改）
+//   3. 强调新增页面时不要破坏既有页面的路由与结构
+const PLANNER_INCREMENTAL_PROMPT = `你是 AI快搭 的 Planner Agent，负责对**已有应用**进行**增量修改**。
+
+用户会提供「当前应用蓝图（App Model）」与「一条修改指令」。你的任务是在保持应用其余部分**完全不变**的前提下，只针对用户指令涉及的页面/组件做增删改。
+
+## 硬性要求（必须遵守）
+
+1. **保留原有主题（theme）**：除非用户明确要求改主题，否则必须**原样输出**输入中的 theme（primaryColor / borderRadius / fontFamily / spacing / darkMode）。
+2. **保留原有数据源（dataSources）**：除非用户明确要求增删数据源，否则 dataSources 必须**原样保留**，一条不删、一条不改。
+3. **保留原有 id 与 createdAt**：应用 id、页面 id、组件 id、createdAt 一律沿用输入中的值，禁止生成新的占位 id。
+4. **只改动被提及的元素**：
+   - 用户说「增加 XX 页面」→ 新增一个页面（含 path/路由/组件），**其余页面完全不动**。
+   - 用户说「修改 XX 页面的 Y」→ 只调整该页面对应组件/属性，其余不动。
+   - 用户说「删除 XX」→ 删除对应页面/组件并清理其路由，其余不动。
+5. **新增页面必须绑定有效路由**：routes 中为新页面添加条目；首页 path 始终为 "/"。
+6. **每个页面至少 1 个有实际内容的组件**；新增列表页含搜索/分页/操作按钮，表单页含校验与提交流程。
+7. 组件的 type 必须是可用组件之一，props 符合其 propsSchema。
+
+## 可用组件
+
+${registry.toPromptDescription()}
+
+## 输入格式
+
+输入为：
+\`\`\`json
+{
+  "existingAppModel": { ...当前 App Model 完整 JSON... },
+  "instruction": "用户的修改指令，例如：增加一个统计页面"
+}
+\`\`\`
+
+## 输出格式
+
+请直接输出**增量修改后的完整 App Model JSON**（不是 diff、不是只输出改动部分），不要包含其他说明文字。将 JSON 放在 \`\`\`json 代码块中。`
+
 export interface PlannerOptions {
   /** 用户需求描述 */
   prompt: string
@@ -167,6 +242,8 @@ export interface PlannerOptions {
   maxRetries?: number
   /** 中止信号 */
   signal?: AbortSignal
+  /** 是否使用增量修改专用 Prompt（更严格地只改被提及元素、保留主题与数据源） */
+  incremental?: boolean
 }
 
 export interface PlannerResult {
@@ -194,7 +271,15 @@ export class PlannerAgent {
         throw new Error('Planner aborted')
       }
 
-      const messages = this.buildMessages(options.prompt, appType, appName, lastError, existing, options.history)
+      const messages = this.buildMessages(
+        options.prompt,
+        appType,
+        appName,
+        lastError,
+        existing,
+        options.history,
+        options.incremental,
+      )
 
       let response: string
       try {
@@ -265,6 +350,35 @@ export class PlannerAgent {
     throw new Error(`Planner 生成失败（已重试 ${maxRetries} 次）：${lastErrMsg}。请检查 LLM 配置或换用其他模型。`)
   }
 
+  /**
+   * 增量修改生成（用户迭代修改专用）。
+   * 基于已有 App Model 与修改指令，生成只改动被提及元素的更新后模型。
+   * 使用专用增量 Prompt，强制保留原有主题（theme）与数据源（dataSources）。
+   */
+  async planIncremental(options: {
+    /** 用户修改指令，如"增加一个统计页面" */
+    instruction: string
+    /** 当前应用蓝图（必填） */
+    existingAppModel: AppModel
+    /** 多轮对话历史 */
+    history?: PlannerOptions['history']
+    /** 最大重试次数（默认 3） */
+    maxRetries?: number
+    /** 中止信号 */
+    signal?: AbortSignal
+  }): Promise<PlannerResult> {
+    return this.plan({
+      prompt: options.instruction,
+      appType: options.existingAppModel.type,
+      appName: options.existingAppModel.name,
+      existingAppModel: options.existingAppModel,
+      history: options.history,
+      maxRetries: options.maxRetries,
+      signal: options.signal,
+      incremental: true,
+    })
+  }
+
   private buildMessages(
     prompt: string,
     appType: AppType,
@@ -272,10 +386,14 @@ export class PlannerAgent {
     errorFeedback: string,
     existing?: AppModel,
     history?: PlannerOptions['history'],
+    incremental?: boolean,
   ): LLMMessage[] {
-    const messages: LLMMessage[] = [
-      { role: 'system', content: existing ? PLANNER_UPDATE_SYSTEM_PROMPT : PLANNER_SYSTEM_PROMPT },
-    ]
+    const systemPrompt = incremental
+      ? PLANNER_INCREMENTAL_PROMPT
+      : existing
+        ? PLANNER_UPDATE_SYSTEM_PROMPT
+        : PLANNER_SYSTEM_PROMPT
+    const messages: LLMMessage[] = [{ role: 'system', content: systemPrompt }]
 
     // 注入多轮对话历史（仅用户消息，最多最近 6 条，避免占用过多 token）
     if (history && history.length > 0) {
@@ -292,7 +410,7 @@ export class PlannerAgent {
 
     messages.push({
       role: 'user',
-      content: this.buildUserPrompt(prompt, appType, appName, errorFeedback, existing),
+      content: this.buildUserPrompt(prompt, appType, appName, errorFeedback, existing, incremental),
     })
     return messages
   }
@@ -447,9 +565,38 @@ export class PlannerAgent {
     appName: string | undefined,
     errorFeedback: string,
     existing?: AppModel,
+    incremental?: boolean,
   ): string {
     // 修改模式：提供已有 App Model 供 LLM 参考
     if (existing) {
+      // 增量修改：使用 { existingAppModel, instruction } 输入格式，强制保留主题/数据源
+      if (incremental) {
+        let content = `## 当前应用蓝图
+
+请严格基于以下 App Model 进行**增量修改**，只改动用户指令涉及的页面/组件，保留原有主题（theme）与数据源（dataSources）。
+
+\`\`\`json
+{
+  "existingAppModel": ${JSON.stringify(existing, null, 2)},
+  "instruction": ${JSON.stringify(prompt)}
+}
+\`\`\`
+
+请输出增量修改后的**完整** App Model JSON（不是 diff）。保持 id、createdAt、theme、dataSources 原样保留，除非用户指令明确要求修改。`
+
+        if (errorFeedback) {
+          content += `
+
+## 上次生成的 App Model 验证失败，错误如下：
+
+${errorFeedback}
+
+请修复这些问题并重新生成完整 JSON。`
+        }
+
+        return content
+      }
+
       let content = `## 已有 App Model
 
 请基于以下已有 App Model，结合用户的修改需求，输出更新后的完整 App Model JSON。

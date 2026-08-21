@@ -77,6 +77,9 @@ export type AgentMessageType =
   | 'product-planning.done' // Product Planning → Orchestrator：产品规划完成
   | 'quality.done' // Quality Evaluation → Orchestrator：质量评分完成
   | 'enhancement.done' // Enhancement → Orchestrator：增强完成
+  | 'ui-visual.skip' // Orchestrator：UI 视觉修复被跳过（功能未通过）
+  | 'ui-visual.repair.start' // Orchestrator：开始 UI 视觉修复
+  | 'ui-visual.repair.done' // Orchestrator：UI 视觉修复完成
 
 /** 消息载荷（按消息类型区分） */
 export type AgentMessagePayload =
@@ -136,6 +139,8 @@ export interface BlueprintProducedPayload {
   requirementFeatures?: string[]
   /** 需求数据实体（由 RequirementAgent 透传），用于数据模型匹配校验 */
   requirementEntities?: Array<{ name: string; description: string }>
+  /** UI 视觉评审改进建议（UI Visual Review 闭环回传，供 CodingAgent 视觉层面优化） */
+  uiVisualSuggestions?: string[]
 }
 
 /** CodingAgent 输出：生成的代码文件 */
@@ -334,6 +339,10 @@ export interface MultiAgentResult {
   qualityReport?: import('./agents/quality-evaluation').QualityEvaluationReport
   /** 增强结果（Enhancement Agent 产出） */
   enhancement?: { addedCapabilities: string[]; summary: string; enhanced: boolean }
+  /** UI 视觉评审结果（UiVisualReviewer 产出） */
+  uiVisualReview?: import('../design-system').UiVisualReviewReport
+  /** UI 视觉评审修复轮数 */
+  uiVisualRepairRounds?: number
 }
 
 /** 应用测试结果消息载荷（Tester → Orchestrator） */

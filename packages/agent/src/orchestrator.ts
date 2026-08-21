@@ -77,6 +77,8 @@ export class Orchestrator {
         history: options.history,
         maxRetries: maxPlannerRetries,
         signal,
+        // 修改模式默认使用增量生成 Prompt（保留主题/数据源，只改被提及元素）
+        incremental: true,
       })
 
       appModel = plannerResult.appModel

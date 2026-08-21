@@ -1,19 +1,99 @@
 import type { AppModel, ComponentNode, Page } from '@aikd/shared'
-import type { GeneratedFile, LLMClient } from './types'
-import { generateId } from './utils'
+import type { GeneratedFile, LLMClient, LLMMessage } from './types'
+import { extractJson } from './utils'
+import { checkIntegrity } from './multi-agent/blueprint/integrity-checker'
+import { antdComponentAdapters } from '@aikd/component-registry'
 import { generateDesignSystemCss, deriveTokens } from './design-system'
 
 // ─── Builder Agent ───────────────────────────────────────
 //
 // Builder 负责将 App Model 转化为可运行的 React 代码文件。
-// 使用确定性代码生成（非 LLM），确保输出稳定可靠。
-// 生成的代码基于 React 18 + TypeScript + Vite。
+// 主路径使用 LLM 生成多文件、工程化的 React 代码（函数组件 + Hooks +
+// antd + Zustand + axios + styled-components + react-router-dom v6），
+// 输出「文件路径 + 内容」的 JSON 数组；校验失败时回退到确定性代码生成兜底，
+// 确保输出稳定可靠。生成的代码基于 React 18 + TypeScript + Vite。
 
 export interface BuilderOptions {
   appModel: AppModel
   /** 应用 ID（task/session id），用于生成与后端一致的数据表主键 */
   appId?: string
   signal?: AbortSignal
+  /** 是否强制走确定性生成（跳过 LLM），默认 false */
+  deterministic?: boolean
+  /** UI 视觉评审改进建议（UI Visual Review 闭环回传，仅视觉层面优化） */
+  uiVisualSuggestions?: string[]
+}
+
+/** Builder 生成的最大重试次数（LLM 输出校验失败时重试） */
+const BUILDER_MAX_RETRIES = 2
+
+/** 构建 Builder 的 System Prompt（注入可用 antd 组件清单） */
+function buildBuilderSystemPrompt(): string {
+  return `你是 AI快搭 的 Builder Agent，负责根据 App Model 生成**多文件、工程化的 React 代码**。
+
+## 技术栈（不可更改）
+- React 18 + TypeScript，**一律函数组件 + Hooks**（useState/useEffect/useMemo/useContext），禁止 class 组件
+- 构建：Vite 5；路由：**react-router-dom v6**（用 <Routes>/<Route>/useNavigate/useParams/Link）
+- UI：**强制使用 Ant Design（antd）组件**，并引用主题变量（primaryColor / borderRadius / fontFamily / spacing）
+- 状态管理：**Zustand** 管理全局状态；页面局部状态用 useState
+- 数据请求：**fetch 或 axios** 处理接口，统一封装到 src/api.ts
+- 样式：**styled-components 或 CSS Modules** 管理样式，复用主题变量
+
+## 文件结构（硬性要求）
+1. 每个页面一个独立文件：src/pages/<pageId>.tsx（函数组件，默认导出）
+2. 抽离公共组件到 src/components/（如 layout、shared 组件），禁止重复实现
+3. 入口与根组件：src/main.tsx、src/App.tsx（用 react-router-dom v6 配置全部路由，含 "/" 首页与动态 :id 路由）
+4. 数据访问层：src/api.ts（用 fetch/axios 封装 CRUD，供页面引用）
+5. 状态仓库：src/store.ts（Zustand store，管理应用级状态）
+6. 主题：src/theme.ts 导出主题对象，antd ConfigProvider + styled-components ThemeProvider 引用
+7. 其余工程文件：package.json / index.html / vite.config.ts / tsconfig.json（必须齐全）
+
+## 组件使用（强制）
+- 必须使用下列 Ant Design 组件（及可用属性名称）：
+${buildComponentListText()}
+- 列表页必须含搜索、分页与操作按钮（新增/编辑/删除）；表单页必须含校验与提交流程
+- 所有页面支持响应式布局，遵循视觉设计原则（F 型视觉流、色彩对比度等）
+
+## 输出格式（严格）
+只输出一个 JSON 数组（不要输出代码块之外的说明文字），元素为：
+[{ "path": "src/App.tsx", "content": "完整代码..." }]
+- content 必须是**完整可运行**的代码，禁止 "// ..." / "…省略" 等占位
+- 路径用正斜杠，相对 import 必须指向实际生成的文件
+- 每个文件都必须正确 import 用到的 antd / react-router-dom / zustand / styled-components / axios 依赖`
+}
+
+/** Builder 可用的 Ant Design 组件清单（供 LLM 引用） */
+function buildComponentListText(): string {
+  return antdComponentAdapters
+    .map((a) => `- ${a.type}（${a.definition.description}）可用属性：${a.propNames.join(', ')}`)
+    .join('\n')
+}
+
+/** 将 AppModel 序列化为 LLM 上下文（含主题/布局/数据源，映射到 V2 语义） */
+function serializeAppModelForBuilder(appModel: AppModel): string {
+  const schema = appModel.schema
+  const pages = (schema.pages ?? []).map((p) => ({
+    id: p.id,
+    path: p.path,
+    title: p.title,
+    layout: p.layout === 'mobile' ? 'sidebar' : p.layout,
+    pageType: p.pageType ?? 'custom',
+    components: p.components ?? [],
+  }))
+  return JSON.stringify(
+    {
+      id: appModel.id,
+      name: appModel.name,
+      type: appModel.type,
+      theme: schema.theme ?? { primaryColor: '#1677ff', fontFamily: 'Inter, sans-serif' },
+      layout: appModel.type === 'h5' ? 'full' : 'sidebar',
+      pages,
+      dataSources: schema.dataSources ?? [],
+      globalState: {},
+    },
+    null,
+    2,
+  )
 }
 
 /** 页面级能力扫描结果（决定注入哪些 import / state / handler） */
@@ -44,30 +124,155 @@ export class BuilderAgent {
     // 为每个有新增意图、却缺少对应 form 页的列表页，自动补一个 /{base}/new 创建页。
     this.ensureCreatePages(normalized)
 
+    // ── 主路径：LLM 生成多文件、工程化代码 ──
+    // 生成后用 checkIntegrity 做静态完整性校验（import 可解析、入口齐全、组件均已声明），
+    // 通过则返回；否则把完整性错误反馈回 LLM 重试；重试耗尽后回退到确定性生成兜底，
+    // 保证输出稳定可靠（不破坏下游流水线与既有契约）。
+    if (!options.deterministic && this.llm) {
+      const llmFiles = await this.buildWithLLM(normalized, appId, options.signal, options.uiVisualSuggestions)
+      if (llmFiles) {
+        return { files: llmFiles }
+      }
+    }
+
+    // ── 兜底：确定性代码生成 ──
+    return { files: this.buildDeterministic(normalized, appId) }
+  }
+
+  /**
+   * LLM 驱动的代码生成。
+   * 将 AppModel（V2 语义）与可用组件清单作为上下文，调用 LLM 生成文件 JSON 数组，
+   * 并通过 checkIntegrity 校验；失败重试 BUILDER_MAX_RETRIES 次。
+   * 全部失败返回 undefined，由上层回退确定性生成。
+   */
+  private async buildWithLLM(
+    appModel: AppModel,
+    appId: string | undefined,
+    signal: AbortSignal | undefined,
+    uiVisualSuggestions?: string[],
+  ): Promise<GeneratedFile[] | undefined> {
+    const systemPrompt = buildBuilderSystemPrompt()
+
+    let lastError = ''
+    for (let attempt = 0; attempt <= BUILDER_MAX_RETRIES; attempt++) {
+      if (signal?.aborted) {
+        throw new Error('Builder aborted')
+      }
+
+      const messages = this.buildLLMMessages(systemPrompt, appModel, appId, lastError, uiVisualSuggestions)
+      let response: string
+      try {
+        response = await this.llm.complete(messages, {
+          temperature: 0.3,
+          max_tokens: 32768,
+          signal,
+        })
+      } catch (err) {
+        console.error('[Builder] LLM call failed:', err)
+        lastError = `LLM 调用失败：${err instanceof Error ? err.message : String(err)}`
+        continue
+      }
+
+      if (!response || response.trim().length === 0) {
+        lastError = 'LLM 返回了空响应'
+        continue
+      }
+
+      const parsed = extractJson(response)
+      if (!parsed || !Array.isArray(parsed)) {
+        lastError = 'LLM 输出不是 JSON 数组'
+        continue
+      }
+
+      const files = this.normalizeLLMFiles(parsed)
+      if (files.length === 0) {
+        lastError = '未从 LLM 输出中提取到任何文件'
+        continue
+      }
+
+      // 静态完整性校验
+      const integrity = checkIntegrity(files)
+      if (integrity.passed) {
+        console.log(`[Builder] LLM generated ${files.length} files (attempt ${attempt + 1})`)
+        return files
+      }
+
+      lastError = `完整性检查未通过：${integrity.issues
+        .filter((i) => i.severity === 'error')
+        .map((i) => i.message)
+        .join('; ')}`
+      console.warn(`[Builder] Integrity failed (attempt ${attempt + 1}): ${lastError}`)
+    }
+
+    console.warn(`[Builder] LLM generation failed after ${BUILDER_MAX_RETRIES + 1} attempts, falling back to deterministic: ${lastError}`)
+    return undefined
+  }
+
+  /** 构造 Builder 的 LLM 消息（系统提示 + AppModel 上下文 + 失败反馈） */
+  private buildLLMMessages(
+    systemPrompt: string,
+    appModel: AppModel,
+    appId: string | undefined,
+    errorFeedback: string,
+    uiVisualSuggestions?: string[],
+  ): LLMMessage[] {
+    const messages: LLMMessage[] = [{ role: 'system', content: systemPrompt }]
+    let body = `## 应用 ID\n${appId ?? appModel.id ?? 'app'}\n\n`
+    body += `## App Model（依据此生成代码）\n\`\`\`json\n${serializeAppModelForBuilder(appModel)}\n\`\`\`\n\n`
+    body += `请依据上述 App Model 生成完整、工程化的 React 代码文件数组。`
+    if (errorFeedback) {
+      body += `\n\n## 上次生成校验失败，请修复以下问题后重新生成完整 JSON 数组：\n\n${errorFeedback}`
+    }
+    if (uiVisualSuggestions && uiVisualSuggestions.length > 0) {
+      body += `\n\n## UI 视觉评审改进建议（仅优化视觉品质，禁止改动页面结构/数据模型/路由/功能逻辑）\n${uiVisualSuggestions.join('\n')}`
+    }
+    messages.push({ role: 'user', content: body })
+    return messages
+  }
+
+  /** 将 LLM 输出的 JSON 数组规范化为 GeneratedFile[]（校验 path/content 合法性） */
+  private normalizeLLMFiles(parsed: unknown): GeneratedFile[] {
+    if (!Array.isArray(parsed)) return []
+    const files: GeneratedFile[] = []
+    const seen = new Set<string>()
+    for (const item of parsed) {
+      if (!item || typeof item !== 'object') continue
+      const obj = item as Record<string, unknown>
+      const path = typeof obj.path === 'string' ? obj.path.trim() : ''
+      const content = typeof obj.content === 'string' ? obj.content : ''
+      if (!path || path.includes('..') || content.length === 0 || seen.has(path)) continue
+      seen.add(path)
+      files.push({ path, content })
+    }
+    return files
+  }
+
+  /** 确定性代码生成（原 build 逻辑，作为 LLM 失败时的稳定兜底） */
+  private buildDeterministic(appModel: AppModel, appId: string | undefined): GeneratedFile[] {
     const files: GeneratedFile[] = []
 
     // 1. 静态配置文件
-    files.push(this.generatePackageJson(normalized))
-    files.push(this.generateIndexHtml(normalized))
+    files.push(this.generatePackageJson(appModel))
+    files.push(this.generateIndexHtml(appModel))
     files.push(this.generateViteConfig())
     files.push(this.generateTsConfig())
 
     // 2. 入口文件
     files.push(this.generateMainTsx())
-    files.push(this.generateIndexCss(normalized))
+    files.push(this.generateIndexCss(appModel))
 
     // 3. App 根组件（含路由）
-    files.push(this.generateAppTsx(normalized))
+    files.push(this.generateAppTsx(appModel))
 
     // 4. 页面组件
-    for (const page of normalized.schema.pages) {
-      files.push(this.generatePageComponent(page, normalized))
+    for (const page of appModel.schema.pages) {
+      files.push(this.generatePageComponent(page, appModel))
     }
 
-    // 5. 数据访问层（无条件生成：页面组件始终可能引用 '../api'，即使无数据源也应生成基础文件）
-    files.push(this.generateDataFile(normalized, appId))
+    // 5. 数据访问层（无条件生成）
+    files.push(this.generateDataFile(appModel, appId))
 
-    return { files }
+    return files
   }
 
   /**

@@ -41,7 +41,12 @@ import {
   RepairAgent,
   type ApplicationTestResult,
 } from './tester'
-import { DesignReviewAgent, type DesignReviewReport } from '../design-system'
+import {
+  DesignReviewAgent,
+  UiVisualReviewer,
+  type DesignReviewReport,
+  type UiVisualReviewReport,
+} from '../design-system'
 import {
   SkillSelector,
   SkillContextLoader,
@@ -79,6 +84,12 @@ export interface MultiAgentRunOptions {
   testProjectDir?: string
   /** 应用测试：自动修复最大轮数（默认 5，最多自动修复 5 轮） */
   maxRepairRounds?: number
+  /** UI 视觉评审：预览 URL（可选；提供时尝试 Playwright 截图 + 多模态评审） */
+  previewUrl?: string
+  /** UI 视觉评审：通过阈值（1-10，默认 7）；低于该值触发 Builder 重新生成 */
+  uiVisualThreshold?: number
+  /** UI 视觉评审修复闭环最大轮数（默认 2，最多额外 2 轮） */
+  uiVisualRepairRounds?: number
 }
 
 export class MultiAgentOrchestrator {
@@ -392,6 +403,90 @@ export class MultiAgentOrchestrator {
           : `Design Review 未达标（score ${designReview.score} < 90），建议优化：${designReview.suggestions.slice(0, 3).join('；')}`,
       })
 
+      // ── 7.5 UI 视觉评审与自动修复闭环 ─────────────────
+      // 引入 UI 视觉评审：对渲染页面做布局/色彩/字体/间距/操作反馈打分（1-10）。
+      // 分数低于阈值（默认 7）时，把建议连同原蓝图回传 Builder 重新生成代码，
+      // 重复「评审-修复」最多 uiVisualRepairRounds（默认 2）轮。
+      // 【功能正确性保护】仅当应用当前功能测试通过时才允许 UI 驱动的重生成，
+      // 避免视觉修复破坏功能正确性；功能未通过时只记录报告、不触发重生成。
+      const uiVisualReviewer = new UiVisualReviewer()
+      const uiThreshold = options.uiVisualThreshold ?? 7
+      const maxUiRepairRounds = options.uiVisualRepairRounds ?? 2
+      let uiVisualReview: UiVisualReviewReport = await uiVisualReviewer.review({
+        files,
+        blueprint: currentBlueprint,
+        appName: options.appName ?? currentBlueprint.appName,
+        previewUrl: options.previewUrl,
+        threshold: uiThreshold,
+      })
+      let uiRepairRounds = 0
+      for (
+        let round = 0;
+        round < maxUiRepairRounds && !uiVisualReview.passed;
+        round++
+      ) {
+        if (options.signal?.aborted) throw new Error('MultiAgentOrchestrator aborted')
+
+        // 功能正确性保护：功能测试未通过时禁止 UI 驱动的重生成
+        if (testResult.status !== 'passed') {
+          this.bus.send('tester', '*', 'ui-visual.skip', {
+            round: round + 1,
+            note: '功能测试未通过，跳过 UI 视觉修复以避免破坏正确性',
+          } as never)
+          break
+        }
+
+        uiRepairRounds++
+        this.bus.send('tester', '*', 'ui-visual.repair.start', {
+          round: round + 1,
+          score: uiVisualReview.score,
+          threshold: uiThreshold,
+          issues: uiVisualReview.issues,
+        } as never)
+
+        // 将「原蓝图 + UI 改进建议」回传 Coding（Builder），要求仅做视觉层面优化，
+        // 不改变页面结构/数据模型/路由（保护功能正确性）。
+        const uiFixMsg = await this.manager.runAgent(
+          'coding',
+          {
+            blueprint: currentBlueprint,
+            notes: `【UI 视觉修复 · 第 ${round + 1} 轮】仅优化视觉品质，不得改动页面结构/数据模型/路由/功能逻辑。当前视觉评分 ${uiVisualReview.score}/${uiThreshold} 未达标。改进建议：${uiVisualReview.suggestions.join('；') || '无'}`,
+            requirementFeatures: requirement.features,
+            requirementEntities: requirement.entities,
+            uiVisualSuggestions: uiVisualReview.suggestions,
+          } as BlueprintProducedPayload,
+          ctx,
+        )
+        const uiCodingOutput = uiFixMsg.payload as CodingProducedPayload
+        files = uiCodingOutput.files
+        appModel = uiCodingOutput.appModel
+
+        // 修复后必须重新通过功能测试（验证未破坏正确性）
+        testResult = await testAgent.test(files, currentBlueprint, {
+          allowRealExecution: options.allowRealTest,
+          projectDir: options.testProjectDir,
+          round: repairRounds + 1,
+        })
+
+        // 重新视觉评审
+        uiVisualReview = await uiVisualReviewer.review({
+          files,
+          blueprint: currentBlueprint,
+          appName: options.appName ?? currentBlueprint.appName,
+          previewUrl: options.previewUrl,
+          threshold: uiThreshold,
+        })
+
+        this.bus.send('tester', '*', 'ui-visual.repair.done', {
+          round: round + 1,
+          score: uiVisualReview.score,
+          threshold: uiThreshold,
+          passed: uiVisualReview.passed,
+          functionalTestPassed: testResult.status === 'passed',
+          changedFiles: files.map((f) => f.path),
+        } as never)
+      }
+
       // ── 8. Application Quality Evaluation（产品完整度评分）──
       // 生成后评估产品完整度/UI/功能/体验/技术五维度，score < 85 进入增强阶段。
       const qualityAgent = new QualityEvaluationAgent()
@@ -541,6 +636,8 @@ export class MultiAgentOrchestrator {
         patternId,
         qualityReport,
         enhancement,
+        uiVisualReview,
+        uiVisualRepairRounds: uiRepairRounds,
       }
     } finally {
       unsubscribe()
